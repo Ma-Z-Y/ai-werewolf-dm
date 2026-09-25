@@ -12,8 +12,8 @@
 项目正在分阶段构建，当前公开基线不是生产版本：
 
 - S1 Headless 规则核心：已完成并通过独立验收。
-- S2 单进程 FastAPI/WebSocket 实时接口层：S2-01 至 S2-08 已验收，S2-09
-  真实时钟与定时器已实现并等待验收。
+- S2 单进程 FastAPI/WebSocket 实时接口层：S2-01 至 S2-13 已完成、合并并
+  通过最终跨层验收修复。
 - S3 前端与 S4 AI DM：尚未开始。
 
 准确状态和下一步以
@@ -43,6 +43,7 @@ python -m venv .venv
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m pytest -q -m latency
 .\.venv\Scripts\python.exe -m ruff check --no-cache src tests
 .\.venv\Scripts\python.exe -m ruff format --check src tests
 .\.venv\Scripts\python.exe -m mypy src
