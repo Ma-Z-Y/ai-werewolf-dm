@@ -22,10 +22,10 @@ jobs:
         working-directory: backend
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -52,7 +52,7 @@ jobs:
         run: python -m pip wheel --no-deps --wheel-dir dist .
 
       - name: Upload wheel
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: werewolf-dm-wheel
           path: backend/dist/*.whl
