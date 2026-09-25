@@ -328,8 +328,7 @@ async def test_remove_room_cleans_tokens_after_cancel() -> None:
     with pytest.raises(asyncio.CancelledError):
         await actor._task
 
-    with pytest.raises(asyncio.CancelledError):
-        await registry.remove_room(created.room_code)
+    await registry.remove_room(created.room_code)
 
     with pytest.raises(ValueError, match="TOKEN_INVALID"):
         registry.tokens.resolve(created.host_token)

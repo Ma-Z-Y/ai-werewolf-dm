@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from typing import Literal, cast
 from uuid import uuid4
 
@@ -67,7 +68,8 @@ async def _send_rate_limited(
     )
     if not limiter.record_overflow():
         return False
-    await sink.drain()
+    with contextlib.suppress(TimeoutError):
+        await asyncio.wait_for(sink.send_queue.join(), timeout=0.25)
     await sink.close(1008)
     return True
 
@@ -84,9 +86,22 @@ async def message_loop(
 ) -> None:
     limiter = limiter or ConnectionRateLimiter(sink.clock)
     while True:
+        now = sink.clock()
+        if room is not None and (room.closed or room.expires_at <= now):
+            await sink.close(code=4001)
+            return
+        if record is not None and record.expires_at <= now:
+            await sink.close(code=4001)
+            return
+        token_remaining = (
+            (record.expires_at - now).total_seconds() if record is not None else idle_timeout
+        )
         remaining = max(
             0.0,
-            idle_timeout - (sink.clock() - sink.last_client_activity_at).total_seconds(),
+            min(
+                idle_timeout - (sink.clock() - sink.last_client_activity_at).total_seconds(),
+                token_remaining,
+            ),
         )
         try:
             raw = await asyncio.wait_for(
@@ -94,6 +109,9 @@ async def message_loop(
                 timeout=remaining,
             )
         except TimeoutError:
+            if record is not None and record.expires_at <= sink.clock():
+                await sink.close(code=4001)
+                return
             if sink.idle_expired(idle_timeout):
                 await sink.close(code=1001)
                 return
@@ -104,16 +122,22 @@ async def message_loop(
         except WebSocketDisconnect:
             await sink.close(code=1000)
             return
-        sink.record_client_activity()
+        if room is not None and (room.closed or room.expires_at <= sink.clock()):
+            await sink.close(code=4001)
+            return
+        if record is not None and record.expires_at <= sink.clock():
+            await sink.close(code=4001)
+            return
         if isinstance(raw, dict) and raw.get("type") == "ping":
-            try:
-                PingMessage.model_validate(raw)
-            except ValidationError:
-                continue
             if not limiter.allow_control():
                 if await _send_rate_limited(sink, limiter):
                     return
                 continue
+            try:
+                PingMessage.model_validate(raw)
+            except ValidationError:
+                continue
+            sink.record_client_activity()
             sink.offer(PongMessage())
             continue
         if (
@@ -125,6 +149,7 @@ async def message_loop(
                 seat_subscribe = SeatSubscribeMessage.model_validate(raw)
             except ValidationError:
                 continue
+            sink.record_client_activity()
             if record is None or not can_subscribe(
                 record,
                 seat_subscribe.channel,
@@ -153,6 +178,7 @@ async def message_loop(
         except (TypeError, ValueError):
             command_message = None
         if command_message is not None:
+            sink.record_client_activity()
             if room is not None and actor is not None:
                 try:
                     ack = await room.submit_command(command_message.command, actor)
@@ -172,6 +198,7 @@ async def message_loop(
             subscribe = SubscribeMessage.model_validate(raw)
         except ValidationError:
             continue
+        sink.record_client_activity()
         if subscribe.channel == "public":
             sink.set_channels(sink.channels | frozenset({"public"}))
             if room is not None:
@@ -184,7 +211,9 @@ async def websocket_session(websocket: WebSocket) -> None:
     sink = ConnectionSink(websocket, clock=registry.clock)
     limiter = ConnectionRateLimiter(registry.clock)
     await sink.start()
-    registry.connection_opened()
+    if not registry.connection_opened():
+        await sink.close(code=1013)
+        return
     room = None
     try:
         sink.offer(AuthRequiredMessage())
@@ -237,8 +266,12 @@ async def websocket_session(websocket: WebSocket) -> None:
             limiter=limiter,
         )
     finally:
-        if sink.close_code is None:
-            await sink.close(code=1011)
-        if room is not None:
-            await room.detach_subscriber(sink.subscription_id)
-        registry.connection_closed(slow=sink.close_code == 1013)
+        try:
+            if sink.close_code is None:
+                await sink.close(code=1011)
+        finally:
+            try:
+                if room is not None:
+                    await room.detach_subscriber(sink.subscription_id)
+            finally:
+                registry.connection_closed(slow=sink.close_code == 1013)

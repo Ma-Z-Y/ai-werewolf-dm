@@ -17,6 +17,7 @@ class Metrics(StrictModel):
     slow_connection_closes: int
     command_latency_ms_p95: float
     broadcast_latency_ms_p95: float
+    max_connection_queue_depth: int
 
 
 class LatencyRecorder:
@@ -25,12 +26,16 @@ class LatencyRecorder:
             raise ValueError("window must be positive")
         self.command_ms: deque[float] = deque(maxlen=window)
         self.broadcast_ms: deque[float] = deque(maxlen=window)
+        self.max_connection_queue_depth = 0
 
     def observe_command_ms(self, value: float) -> None:
         self.command_ms.append(value)
 
     def observe_broadcast_ms(self, value: float) -> None:
         self.broadcast_ms.append(value)
+
+    def observe_connection_queue_depth(self, value: int) -> None:
+        self.max_connection_queue_depth = max(self.max_connection_queue_depth, value)
 
     @staticmethod
     def _p95(values: deque[float]) -> float:
@@ -65,6 +70,7 @@ def metrics_router(
             slow_connection_closes=resolved_registry.slow_connection_closes,
             command_latency_ms_p95=latency.command_latency_ms_p95(),
             broadcast_latency_ms_p95=latency.broadcast_latency_ms_p95(),
+            max_connection_queue_depth=latency.max_connection_queue_depth,
         )
 
     return router

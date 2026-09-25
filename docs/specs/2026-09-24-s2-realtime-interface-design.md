@@ -1,6 +1,6 @@
 ---
 spec_id: s2-realtime-interface
-version: 1.1.0
+version: 1.2.0
 status: frozen
 frozen_at: 2026-09-24
 owner: architecture
@@ -123,7 +123,9 @@ class RoomActor:
 
 `RoomRegistry` 保存 `room_code -> RoomActor`：
 
-- `create_room()` 生成内部 UUID、短房间码、主持人令牌和 RoomActor，并启动 RoomActor 与其 TimerScheduler 生命周期。
+- `create_room()` 生成内部 UUID、短房间码、主持人令牌和未启动的 RoomActor；调用方必须再调用 `start_room()`。
+- `start_room()` 启动 RoomActor 与其 TimerScheduler 生命周期。启动前提交命令、订阅或时钟事件返回 `ROOM_NOT_STARTED`，不得静默排队。
+- `max_rooms` 默认 256；达到上限时创建房间返回 `ROOM_LIMIT_REACHED`。
 - `join_room()` 分配下一个空座位并签发座位令牌。
 - `get_by_code()` 只返回 RoomActor，不暴露内部异常。
 - S2-02 一次性冻结以下 Registry API，后续任务只允许使用，不得再自行扩张：
@@ -135,6 +137,7 @@ class RoomActor:
 - 房间码全局唯一；碰撞时重试，超过上限返回内部错误。
 - `reap_expired()` 按 `expires_at` 和 `last_activity_at` 清理房间。
 - 清理房间时同步删除该房间全部令牌。
+- 全局连接数默认上限为 1024；达到上限时新 WebSocket 以 `1013` 关闭且不进入 RoomActor。
 
 ### 5.3 订阅
 
@@ -147,6 +150,8 @@ class RoomSubscriber(Protocol):
     seat_id: int | None
     def offer(self, message: ServerMessage) -> bool:
         raise NotImplementedError
+    def request_close(self, code: int) -> None:
+        raise NotImplementedError
 ```
 
 `offer()` 必须非阻塞：
@@ -154,6 +159,7 @@ class RoomSubscriber(Protocol):
 - 返回 `True` 表示已进入该连接的有界发送队列。
 - 返回 `False` 表示连接落后。
 - RoomActor 不等待 socket 发送。
+- `request_close()` 由 RoomActor 在重连替换等场景同步调用，传输层负责异步清理发送队列并关闭 socket。
 
 ## 6. 令牌与认证
 
@@ -182,6 +188,7 @@ class TokenSource(Protocol):
 - `TokenService` 按 `room_id` 维护独立座位占用表，不跨房间共享。
 - 只有未过期且属于当前房间的座位令牌占用座位；过期座位可以重新分配。
 - 删除房间时级联删除主持人令牌和全部座位令牌。
+- 已认证连接在每个接收回合和每个消息处理前复检 `expires_at`；令牌过期后立即以 `4001` 关闭。
 
 ### 6.2 WebSocket 首帧认证
 
@@ -379,7 +386,7 @@ Authorization: Bearer <host-token>
 - 队列满时计数；连续 3 次满或超过 2 秒未恢复，以 `1013` 关闭。
 - 关闭后清除连接注册和订阅，不删除座位令牌。
 - `interfaces/http_ws/runtime.py` 提供 `ConnectionSink`，`ws.py` 不直接发送房间广播。
-- 同一 actor 重连时，RoomActor 在同一队列回合内原子替换旧 subscriber，再关闭旧连接。
+- 同一 `(actor_type, seat_id)` 重连时，RoomActor 在同一队列回合内移除旧 subscriber、调用旧连接的 `request_close(4003)`，再安装新 subscriber。
 
 ### 9.2 有序 outbox
 
@@ -396,6 +403,8 @@ Authorization: Bearer <host-token>
 - 60 秒无任何客户端消息时，服务端主动关闭连接。
 - 心跳不进入房间命令队列，不改变游戏状态。
 - WebSocket 只允许一个 receive/message-pump loop；S2-04 的认证后循环通过 `asyncio.wait_for(..., timeout=60)` 同时承担空闲检测，S2-05 与 S2-07 在同一循环内增加 subscribe/command dispatch，不得再启动第二个 receiver。
+- receive 超时取“会话空闲剩余时间”和“令牌剩余有效期”的较小值。
+- 形状类似 `ping` 的消息即使 schema 不合法，也必须先消耗 `ping/auth` 控制令牌桶。只有通过严格协议校验并进入对应分支的消息才刷新空闲时间；畸形 `ping` 和未知/非法协议消息不得绕过空闲关闭或洪泛关闭。
 
 ## 10. 真实计时器
 
@@ -435,6 +444,8 @@ class RealClock:
 - 删除房间时同步删除该房间令牌。
 - 测试通过 `FrozenClock` 调用 `reap_expired()`，不使用后台 sleep。
 - 生产 reaper 只由 `interfaces/http_ws/runtime.py` 启动。
+- app-owned lifespan 创建受控 reaper task，默认每 60 秒调用 `reap_expired()`；shutdown 时取消并 await。注入的 registry 不由 lifespan 接管。
+- `get_by_code()`、`join_room()` 和 `rooms_by_id()` 必须立即排除已过期房间，即使 reaper 尚未运行；WebSocket 认证只能解析这些未过期房间。
 
 ## 11. 重连与房间生命周期
 
@@ -472,6 +483,7 @@ created -> open -> playing -> ended -> idle
 - `BAD_REQUEST`
 - `ROOM_NOT_FOUND`
 - `ROOM_FULL`
+- `ROOM_LIMIT_REACHED`
 - `TOKEN_INVALID`
 - `TOKEN_EXPIRED`
 - `CHANNEL_FORBIDDEN`
@@ -542,7 +554,8 @@ created -> open -> playing -> ended -> idle
   "auth_failures": 0,
   "slow_connection_closes": 0,
   "command_latency_ms_p95": 1.2,
-  "broadcast_latency_ms_p95": 3.4
+  "broadcast_latency_ms_p95": 3.4,
+  "max_connection_queue_depth": 0
 }
 ```
 
@@ -554,7 +567,7 @@ created -> open -> playing -> ended -> idle
 | `LAT-002` | 真实 LLM 复杂播报延后到 S4；S2 只保留测量接缝 |
 | `LAT-003` | LLM 1.5 秒降级延后到 S4 |
 | `LAT-004` | 6 个 WebSocket 客户端广播 p95 小于 300ms |
-| `LAT-005` | 模板 + outbox + writer queue 回退路径不超过 500ms |
+| `LAT-005` | S2 模板/视图消息从 RoomActor outbox 分配到 writer queue 发送完成不超过 500ms；真实 LLM 回退仍属于 S4 |
 
 延迟测试使用 `@pytest.mark.latency`，在普通单元测试中默认跳过。
 
@@ -591,3 +604,15 @@ created -> open -> playing -> ended -> idle
 - 冻结 `RoomRegistry` 的 `get_by_code`、`rooms_by_id`、`snapshot`、`actor_for` API。
 - 明确 TimerScheduler 在 `clear()` 后复检，避免丢失刚发生的 deadline 变化。
 - 明确 WebSocket 只有一个 receive/message-pump loop，并将 S2-04 的空闲检测边界写清。
+
+### v1.2.0 - 2026-09-25
+
+- 明确 `create_room()` 与 `start_room()` 分工，并禁止未启动房间静默排队。
+- 增加房间数、连接数上限和 `ROOM_LIMIT_REACHED` 错误码。
+- 已认证 WebSocket 在会话期间持续校验令牌过期时间。
+- 同一 actor 重连时原子替换旧 subscriber，并以 `4003` 关闭旧连接。
+- ConnectionSink 关闭流程显式处理 `OSError`、取消 writer、清空未完成队列并始终释放等待者。
+- 畸形 ping 同样消耗控制令牌桶。
+- 生产 lifespan 启动并回收周期房间 reaper，过期房间立即拒绝 lookup/join。
+- `/metrics` 增加 `max_connection_queue_depth`。
+- LAT-005 明确为 S2 outbox-to-writer 口径，不宣称实现 S4 LLM fallback。
