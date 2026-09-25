@@ -12,6 +12,7 @@ from starlette.websockets import WebSocketDisconnect
 from werewolf_dm.application.rooms import RoomRegistry
 from werewolf_dm.domain.visibility import ProjectionAccessError
 from werewolf_dm.interfaces.http_ws.audit import router as audit_router
+from werewolf_dm.interfaces.http_ws.display import router as display_router
 from werewolf_dm.interfaces.http_ws.errors import ErrorCode, ErrorResponse, sanitize_error
 from werewolf_dm.interfaces.http_ws.metrics import LatencyRecorder, metrics_router
 from werewolf_dm.interfaces.http_ws.models import HealthResponse
@@ -92,6 +93,7 @@ def create_app(
     app.state.reaper_interval_seconds = max(0.001, reaper_interval_seconds)
     app.include_router(rooms_router)
     app.include_router(audit_router)
+    app.include_router(display_router)
     app.include_router(ws_router)
     app.include_router(metrics_router(registry, latency))
 
