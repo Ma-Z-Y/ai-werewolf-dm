@@ -19,16 +19,6 @@ from werewolf_dm.interfaces.http_ws.models import CommandAckMessage, PublicViewM
 from werewolf_dm.interfaces.http_ws.runtime import ConnectionSink
 
 
-@pytest.fixture(autouse=True)
-def latency_opt_in(request: pytest.FixtureRequest, pytestconfig: pytest.Config) -> None:
-    if request.node.get_closest_marker("latency") is None:
-        return
-    if request.node.get_closest_marker("skip") is not None:
-        return
-    if "latency" not in (pytestconfig.option.markexpr or ""):
-        pytest.skip("latency tests run explicitly with -m latency")
-
-
 class RecordingSocket:
     def __init__(self) -> None:
         self.accepted = False
@@ -93,9 +83,17 @@ def test_metrics_endpoint_reports_strict_registry_and_latency_counters() -> None
         "active_connections": 1,
         "auth_failures": 3,
         "slow_connection_closes": 1,
-        "command_latency_ms_p95": 2.0,
-        "broadcast_latency_ms_p95": 2.0,
+        "command_latency_ms_p95": 3.0,
+        "broadcast_latency_ms_p95": 3.0,
     }
+
+
+def test_latency_recorder_p95_uses_nearest_rank() -> None:
+    recorder = LatencyRecorder(window=21)
+    for value in range(1, 22):
+        recorder.observe_broadcast_ms(float(value))
+
+    assert recorder.broadcast_latency_ms_p95() == 20.0
 
 
 async def test_connection_sink_uses_app_recorder_and_classifies_messages() -> None:

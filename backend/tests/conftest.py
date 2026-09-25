@@ -72,6 +72,15 @@ from werewolf_dm.domain.contracts import (
 from werewolf_dm.domain.enums import Phase, Role
 
 
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    if config.option.markexpr:
+        return
+    skip_latency = pytest.mark.skip(reason="latency tests run explicitly with -m latency")
+    for item in items:
+        if item.get_closest_marker("latency") is not None:
+            item.add_marker(skip_latency)
+
+
 @pytest.fixture
 def room_id() -> UUID:
     return seat_actor(1).room_id
