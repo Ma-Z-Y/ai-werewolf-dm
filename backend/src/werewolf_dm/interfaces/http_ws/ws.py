@@ -93,6 +93,17 @@ async def message_loop(
         if record is not None and record.expires_at <= now:
             await sink.close(code=4001)
             return
+        if (
+            room is not None
+            and record is not None
+            and record.actor_type == "display"
+            and (
+                record.token_digest != room.display_token_digest
+                or record.session_id != room.display_session_id
+            )
+        ):
+            await sink.close(code=4001)
+            return
         token_remaining = (
             (record.expires_at - now).total_seconds() if record is not None else idle_timeout
         )
@@ -128,6 +139,17 @@ async def message_loop(
         if record is not None and record.expires_at <= sink.clock():
             await sink.close(code=4001)
             return
+        if (
+            room is not None
+            and record is not None
+            and record.actor_type == "display"
+            and (
+                record.token_digest != room.display_token_digest
+                or record.session_id != room.display_session_id
+            )
+        ):
+            await sink.close(code=4001)
+            return
         if isinstance(raw, dict) and raw.get("type") == "ping":
             if not limiter.allow_control():
                 if await _send_rate_limited(sink, limiter):
@@ -140,6 +162,46 @@ async def message_loop(
             sink.record_client_activity()
             sink.offer(PongMessage())
             continue
+        if isinstance(raw, dict) and raw.get("type") == "subscribe":
+            channel = raw.get("channel")
+            if not isinstance(channel, str):
+                sink.offer(
+                    ErrorMessage(
+                        code=ErrorCode.CHANNEL_FORBIDDEN,
+                        message="频道不可用",
+                        request_id=uuid4(),
+                    )
+                )
+                continue
+            if actor is not None and actor.actor_type == "display" and channel != "public":
+                sink.offer(
+                    ErrorMessage(
+                        code=ErrorCode.CHANNEL_FORBIDDEN,
+                        message="频道不可用",
+                        request_id=uuid4(),
+                    )
+                )
+                continue
+            if channel not in {"public", "seat", "host.control"}:
+                sink.offer(
+                    ErrorMessage(
+                        code=ErrorCode.CHANNEL_FORBIDDEN,
+                        message="频道不可用",
+                        request_id=uuid4(),
+                    )
+                )
+                continue
+            if channel == "host.control":
+                if actor is not None and actor.actor_type == "host":
+                    continue
+                sink.offer(
+                    ErrorMessage(
+                        code=ErrorCode.CHANNEL_FORBIDDEN,
+                        message="频道不可用",
+                        request_id=uuid4(),
+                    )
+                )
+                continue
         if (
             isinstance(raw, dict)
             and raw.get("type") == "subscribe"
@@ -179,6 +241,15 @@ async def message_loop(
             command_message = None
         if command_message is not None:
             sink.record_client_activity()
+            if actor is not None and actor.actor_type == "display":
+                sink.offer(
+                    ErrorMessage(
+                        code=ErrorCode.ACTOR_NOT_AUTHORIZED,
+                        message="操作未授权",
+                        request_id=uuid4(),
+                    )
+                )
+                continue
             if room is not None and actor is not None:
                 try:
                     ack = await room.submit_command(command_message.command, actor)
@@ -255,6 +326,12 @@ async def websocket_session(websocket: WebSocket) -> None:
             seat_id=actor.seat_id,
             session_id=record.session_id,
         )
+        if actor.actor_type == "display" and (
+            record.token_digest != room.display_token_digest
+            or record.session_id != room.display_session_id
+        ):
+            await sink.close(code=4001)
+            return
         try:
             await room.attach_subscriber(cast(RoomSubscriber, sink))
         except RoomClosedError:

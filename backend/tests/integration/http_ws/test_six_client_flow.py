@@ -144,6 +144,7 @@ def make_registry() -> RoomRegistry:
                 "seat-4-token",
                 "seat-5-token",
                 "seat-6-token",
+                "display-token",
             ),
             room_codes=(ROOM_CODE,),
         ),
@@ -883,6 +884,44 @@ def test_six_client_end_to_end_service_flow() -> None:
             final_state = room.core.state
             if final_state.winner is None:
                 raise AssertionError("GAME_END did not record a winner")
+
+            pairing_response = http.post(
+                f"/rooms/{created['room_code']}/display-pairings",
+                headers={"Authorization": f"Bearer {created['host_token']}"},
+            )
+            pairing_response.raise_for_status()
+            display_response = http.post(
+                f"/rooms/{created['room_code']}/display-sessions",
+                json={"pairing_code": pairing_response.json()["pairing_code"]},
+            )
+            display_response.raise_for_status()
+            display, display_ready = open_authenticated_client(
+                stack,
+                port,
+                display_response.json()["display_token"],
+            )
+            if (
+                display_ready["snapshot"]["seat_view"] is not None
+                or display_ready["snapshot"]["host_control"] is not None
+                or display_ready["snapshot"]["public_view"] is None
+            ):
+                raise AssertionError("display session.ready shape is incorrect")
+            revision_before_display_command = room.core.state.revision
+            display.send(
+                json.dumps(
+                    command_message(
+                        room.room_id,
+                        SetReadyCommand(ready=True),
+                        expected_revision=room.core.state.revision,
+                        now=room.clock(),
+                    )
+                )
+            )
+            display_error = receive_type(display, "error")
+            if display_error.get("code") != "ACTOR_NOT_AUTHORIZED":
+                raise AssertionError(f"display command was not rejected: {display_error!r}")
+            if room.core.state.revision != revision_before_display_command:
+                raise AssertionError("display command changed game state")
 
             replay_response = http.get(
                 f"/rooms/{created['room_code']}/replay",

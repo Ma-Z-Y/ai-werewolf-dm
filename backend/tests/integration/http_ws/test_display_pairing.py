@@ -5,12 +5,21 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from tests.clocks import MutableClock
 from werewolf_dm.application.rooms import (
+    AttachSubscriberEvent,
+    RoomActor,
     RoomRegistry,
     RoomUpdate,
     SequenceTokenSource,
+)
+from werewolf_dm.domain.contracts import (
+    CommandEnvelope,
+    CommandPayload,
+    HostPauseCommand,
+    SetReadyCommand,
 )
 from werewolf_dm.interfaces.http_ws.app import create_app
 
@@ -334,9 +343,10 @@ async def test_new_display_session_closes_only_stale_subscriber(
     stale = _FakeSubscriber(session_id=uuid4())
     current = _FakeSubscriber(session_id=uuid4())
     try:
+        room.display_session_id = stale.session_id
         await room.attach_subscriber(stale)
-        await room.attach_subscriber(current)
         room.display_session_id = current.session_id
+        await room.attach_subscriber(current)
 
         room.sync_display_session()
         async with asyncio.timeout(1.0):
@@ -369,6 +379,343 @@ async def test_remove_room_cleans_pairings_attempts_and_display_token(
     assert registry.tokens.display_record(room.room_id) is None
     with pytest.raises(ValueError, match="TOKEN_INVALID"):
         registry.tokens.resolve(display_token)
+
+
+def _exchange_display(
+    client: TestClient,
+    created: dict[str, str],
+) -> dict[str, str]:
+    pairing = _create_pairing(client, created)
+    response = _exchange(client, created, pairing["pairing_code"])
+    assert response.status_code == 201
+    return response.json()
+
+
+def _authenticate_display(
+    socket,
+    token: str,
+) -> dict:
+    assert socket.receive_json() == {"type": "auth.required"}
+    socket.send_json({"type": "auth", "token": token, "last_seq": 0})
+    return socket.receive_json()
+
+
+def _command_frame(
+    room_id: str,
+    payload: CommandPayload,
+    *,
+    expected_revision: int,
+) -> dict:
+    envelope = CommandEnvelope(
+        command_id=uuid4(),
+        room_id=UUID(room_id),
+        expected_revision=expected_revision,
+        issued_at=datetime(2026, 9, 25, tzinfo=UTC),
+        payload=payload,
+    )
+    return {
+        "type": "command",
+        "command": envelope.model_dump(mode="json"),
+    }
+
+
+def test_display_can_read_public_but_cannot_send_command(
+    app_client: TestClient,
+    created: dict[str, str],
+    registry: RoomRegistry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    display = _exchange_display(app_client, created)
+    room = registry.get_by_code(created["room_code"])
+    revision_before = room.core.state.revision
+
+    def fail_submit(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise AssertionError("display command entered GameCore.submit")
+
+    monkeypatch.setattr(room.core, "submit", fail_submit)
+
+    with app_client.websocket_connect("/ws") as socket:
+        ready = _authenticate_display(socket, display["display_token"])
+        assert ready["snapshot"]["seat_view"] is None
+        assert ready["snapshot"]["host_control"] is None
+        assert ready["snapshot"]["public_view"] is not None
+
+        socket.send_json(
+            _command_frame(
+                ready["snapshot"]["room_id"],
+                SetReadyCommand(ready=True),
+                expected_revision=ready["snapshot"]["revision"],
+            )
+        )
+        error = socket.receive_json()
+        assert error["type"] == "error"
+        assert error["code"] == "ACTOR_NOT_AUTHORIZED"
+
+    assert room.core.state.revision == revision_before
+
+
+@pytest.mark.parametrize(
+    "subscription",
+    [
+        {"type": "subscribe", "channel": "host.control"},
+        {"type": "subscribe", "channel": "seat", "seat_id": 1},
+        {"type": "subscribe", "channel": []},
+    ],
+)
+def test_display_subscription_outside_public_is_forbidden(
+    app_client: TestClient,
+    created: dict[str, str],
+    subscription: dict,
+) -> None:
+    display = _exchange_display(app_client, created)
+
+    with app_client.websocket_connect("/ws") as socket:
+        _authenticate_display(socket, display["display_token"])
+        socket.send_json(subscription)
+        error = socket.receive_json()
+        assert error["type"] == "error"
+        assert error["code"] == "CHANNEL_FORBIDDEN"
+
+
+def test_seat_cannot_subscribe_host_control(
+    app_client: TestClient,
+    created: dict[str, str],
+) -> None:
+    seat = app_client.post(
+        f"/rooms/{created['room_code']}/join",
+        json={"display_name": "Alice"},
+    ).json()
+
+    with app_client.websocket_connect("/ws") as socket:
+        _authenticate_display(socket, seat["seat_token"])
+        socket.send_json({"type": "subscribe", "channel": "host.control"})
+        error = socket.receive_json()
+        assert error["type"] == "error"
+        assert error["code"] == "CHANNEL_FORBIDDEN"
+
+
+def test_host_subscribe_to_host_control_is_idempotent_noop(
+    app_client: TestClient,
+    created: dict[str, str],
+    registry: RoomRegistry,
+) -> None:
+    with app_client.websocket_connect("/ws") as socket:
+        _authenticate_display(socket, created["host_token"])
+        room = registry.get_by_code(created["room_code"])
+        assert len(room.subscribers) == 1
+
+        socket.send_json({"type": "subscribe", "channel": "host.control"})
+        socket.send_json({"type": "ping"})
+
+        assert socket.receive_json() == {"type": "pong"}
+        assert len(room.subscribers) == 1
+
+
+def test_same_display_token_reconnect_replaces_old_socket_with_4003(
+    app_client: TestClient,
+    created: dict[str, str],
+) -> None:
+    display = _exchange_display(app_client, created)
+
+    with app_client.websocket_connect("/ws") as first:
+        _authenticate_display(first, display["display_token"])
+        with app_client.websocket_connect("/ws") as second:
+            _authenticate_display(second, display["display_token"])
+            with pytest.raises(WebSocketDisconnect) as exc_info:
+                first.receive_json()
+            assert exc_info.value.code == 4003
+
+
+def test_rotated_display_token_closes_old_socket_with_4001(
+    app_client: TestClient,
+    created: dict[str, str],
+) -> None:
+    first_display = _exchange_display(app_client, created)
+
+    with app_client.websocket_connect("/ws") as socket:
+        _authenticate_display(socket, first_display["display_token"])
+        _exchange_display(app_client, created)
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            socket.receive_json()
+        assert exc_info.value.code == 4001
+
+
+def test_rotation_does_not_close_the_new_display_session(
+    app_client: TestClient,
+    created: dict[str, str],
+) -> None:
+    first_display = _exchange_display(app_client, created)
+    with app_client.websocket_connect("/ws") as first:
+        _authenticate_display(first, first_display["display_token"])
+        second_display = _exchange_display(app_client, created)
+        with app_client.websocket_connect("/ws") as second:
+            _authenticate_display(second, second_display["display_token"])
+            with pytest.raises(WebSocketDisconnect):
+                first.receive_json()
+            second.send_json({"type": "ping"})
+            assert second.receive_json() == {"type": "pong"}
+
+
+def test_revoking_display_closes_existing_socket_with_4001(
+    app_client: TestClient,
+    created: dict[str, str],
+) -> None:
+    display = _exchange_display(app_client, created)
+
+    with app_client.websocket_connect("/ws") as socket:
+        _authenticate_display(socket, display["display_token"])
+        response = app_client.delete(
+            f"/rooms/{created['room_code']}/display-sessions/current",
+            headers=_host_headers(created),
+        )
+        assert response.status_code == 204
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            socket.receive_json()
+        assert exc_info.value.code == 4001
+
+
+def test_display_token_cannot_use_replay_or_audit(
+    app_client: TestClient,
+    created: dict[str, str],
+) -> None:
+    display = _exchange_display(app_client, created)
+    headers = {"Authorization": f"Bearer {display['display_token']}"}
+
+    assert (
+        app_client.get(
+            f"/rooms/{created['room_code']}/replay",
+            headers=headers,
+        ).status_code
+        == 403
+    )
+    assert (
+        app_client.get(
+            f"/rooms/{created['room_code']}/audit",
+            headers=headers,
+        ).status_code
+        == 403
+    )
+
+
+@pytest.mark.parametrize(
+    "stale_field",
+    ["display_token_digest", "display_session_id"],
+)
+def test_message_loop_rechecks_display_identity_before_handling_input(
+    app_client: TestClient,
+    created: dict[str, str],
+    registry: RoomRegistry,
+    stale_field: str,
+) -> None:
+    display = _exchange_display(app_client, created)
+    room = registry.get_by_code(created["room_code"])
+
+    with app_client.websocket_connect("/ws") as socket:
+        _authenticate_display(socket, display["display_token"])
+        if stale_field == "display_token_digest":
+            room.display_token_digest = "stale-digest"
+        else:
+            room.display_session_id = uuid4()
+        socket.send_json({"type": "ping"})
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            socket.receive_json()
+        assert exc_info.value.code == 4001
+
+
+@pytest.mark.parametrize(
+    "stale_session_id",
+    [None, uuid4()],
+    ids=["revoked", "rotated"],
+)
+def test_stale_display_is_closed_before_public_broadcast(
+    app_client: TestClient,
+    created: dict[str, str],
+    registry: RoomRegistry,
+    stale_session_id: UUID | None,
+) -> None:
+    display = _exchange_display(app_client, created)
+    room = registry.get_by_code(created["room_code"])
+
+    with (
+        app_client.websocket_connect("/ws") as display_socket,
+        app_client.websocket_connect("/ws") as host_socket,
+    ):
+        _authenticate_display(display_socket, display["display_token"])
+        _authenticate_display(host_socket, created["host_token"])
+        room.display_session_id = stale_session_id
+
+        host_socket.send_json(
+            _command_frame(
+                created["room_id"],
+                HostPauseCommand(reason="broadcast-after-display-invalidation"),
+                expected_revision=room.core.state.revision,
+            )
+        )
+
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            while True:
+                frame = display_socket.receive_json()
+                assert frame["type"] != "public.view.updated"
+        assert exc_info.value.code == 4001
+
+        assert host_socket.receive_json()["type"] == "public.view.updated"
+        assert host_socket.receive_json()["type"] == "host.control.updated"
+        assert host_socket.receive_json()["type"] == "command.ack"
+
+
+def test_stale_display_attach_is_rejected_before_session_ready() -> None:
+    clock = MutableClock(datetime(2026, 9, 25, tzinfo=UTC))
+    room = RoomActor(
+        room_id=uuid4(),
+        room_code="ROOM01",
+        seed=1001,
+        clock=clock,
+        expires_at=clock() + timedelta(hours=1),
+        last_activity_at=clock(),
+    )
+    stale = _StaleDisplaySubscriber(uuid4())
+    room.display_session_id = uuid4()
+
+    async def scenario() -> None:
+        future = asyncio.get_running_loop().create_future()
+        await room.events.put(
+            AttachSubscriberEvent(
+                subscriber=stale,
+                result=future,
+                initial=True,
+            )
+        )
+        room.display_session_id = uuid4()
+        await room.start()
+        try:
+            await future
+            assert stale.subscription_id not in room.subscribers
+        finally:
+            await room.stop()
+
+    asyncio.run(scenario())
+
+    assert stale.messages == []
+    assert stale.close_codes == [4001]
+
+
+class _StaleDisplaySubscriber:
+    def __init__(self, session_id: UUID) -> None:
+        self.subscription_id = uuid4()
+        self.actor_type = "display"
+        self.seat_id = None
+        self.session_id = session_id
+        self.channels = frozenset({"public"})
+        self.messages: list[RoomUpdate] = []
+        self.close_codes: list[int] = []
+
+    def offer(self, message: RoomUpdate) -> bool:
+        self.messages.append(message)
+        return True
+
+    def request_close(self, code: int) -> None:
+        self.close_codes.append(code)
 
 
 class _FakeSubscriber:
