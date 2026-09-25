@@ -19,9 +19,17 @@
 - GitHub Actions CI、CodeQL、Dependabot 和开源协作模板。
 - Wheel 内置 Apache-2.0 许可文本和 PEP 561 `py.typed` 标记。
 - 包版本与应用健康检查版本统一为 `0.2.0`。
+- S2-10 至 S2-13：审计/回放导出、指标与延迟测量、真实六客户端端到端流程、
+  delivery gate、nearest-rank p95 和 latency marker CI 门禁。
+- S2 最终验收修复：过期 token/房间关闭、same-actor 重连替换、满队列
+  2 秒定时关闭、生产 reaper 生命周期、房间/连接上限、严格协议活动门和
+  真实 `RoomActor` outbox LAT-005 证据。
 
 ### Security
 
-- 未知异常仅记录在服务端，客户端只接收安全错误码和 `request_id`。
+- 未知异常与 reaper 异常仅记录 exception type，不记录异常文本或
+  traceback；客户端只接收安全错误码和 `request_id`。
 - token 原文、片段、摘要和隐藏角色/事实不会进入错误响应。
 - 跨座位频道订阅和跨租户 actor 覆盖均被拒绝。
+- 房间删除或过期会主动关闭已认证连接；malformed ping 和未知协议消息不会
+  刷新空闲时间或绕过连接洪泛控制。
