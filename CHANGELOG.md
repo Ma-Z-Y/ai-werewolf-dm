@@ -13,6 +13,8 @@
 - REST 房间创建/加入、WebSocket 首帧认证、公共/座位频道和命令桥。
 - 严格错误白名单、全局异常处理器和 VIS-007 泄漏回归。
 - GitHub Actions CI、CodeQL、Dependabot 和开源协作模板。
+- Wheel 内置 Apache-2.0 许可文本和 PEP 561 `py.typed` 标记。
+- 包版本与应用健康检查版本统一为 `0.2.0`。
 
 ### Security
 
