@@ -36,6 +36,9 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
 
+      - name: Verify license copies match
+        run: python -c "from pathlib import Path; assert Path('LICENSE').read_bytes() == Path('../LICENSE').read_bytes()"
+
       - name: Lint
         run: python -m ruff check --no-cache src tests
 
@@ -50,6 +53,18 @@ jobs:
 
       - name: Build wheel
         run: python -m pip wheel --no-deps --wheel-dir dist .
+
+      - name: Verify wheel contains license and type marker
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          wheel = next(Path("dist").glob("*.whl"))
+          names = ZipFile(wheel).namelist()
+          assert "werewolf_dm/py.typed" in names, names
+          assert any(name.endswith(".dist-info/licenses/LICENSE") for name in names), names
+          PY
 
       - name: Upload wheel
         uses: actions/upload-artifact@v7
