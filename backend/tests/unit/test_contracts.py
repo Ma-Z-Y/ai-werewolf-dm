@@ -50,6 +50,11 @@ def test_actor_requires_host_to_omit_seat(room_id):
         AuthenticatedActor(actor_type="host", seat_id=1, room_id=room_id)
 
 
+def test_display_actor_requires_null_seat() -> None:
+    actor = AuthenticatedActor(actor_type="display", room_id=uuid4())
+    assert actor.seat_id is None
+
+
 def test_every_event_type_has_a_payload_model():
     assert set(EVENT_PAYLOAD_MODELS) == set(EventType)
 

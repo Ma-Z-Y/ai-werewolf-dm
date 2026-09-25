@@ -8,13 +8,18 @@ import string
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Literal, Protocol
+from typing import Literal, Protocol, Self
 from uuid import UUID, uuid4
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from werewolf_dm.application.core import Clock, GameCore
-from werewolf_dm.domain.contracts import AuthenticatedActor, CommandEnvelope, CommandErrorCode
+from werewolf_dm.domain.contracts import (
+    ActorType,
+    AuthenticatedActor,
+    CommandEnvelope,
+    CommandErrorCode,
+)
 from werewolf_dm.domain.model import StrictModel
 from werewolf_dm.domain.visibility import (
     PublicView,
@@ -56,10 +61,30 @@ class SequenceTokenSource:
 class TokenRecord(StrictModel):
     token_digest: str
     room_id: UUID
-    actor_type: Literal["seat", "host"]
+    actor_type: ActorType
     seat_id: int | None = Field(default=None, ge=1, le=6)
+    session_id: UUID | None = None
     issued_at: datetime
     expires_at: datetime
+
+    @model_validator(mode="after")
+    def validate_actor_session_shape(self) -> Self:
+        if self.actor_type == "seat":
+            if self.seat_id is None:
+                raise ValueError("seat token requires seat_id")
+            if self.session_id is not None:
+                raise ValueError("seat token cannot carry session_id")
+        elif self.actor_type == "host":
+            if self.seat_id is not None:
+                raise ValueError("host token cannot carry seat_id")
+            if self.session_id is not None:
+                raise ValueError("host token cannot carry session_id")
+        else:
+            if self.seat_id is not None:
+                raise ValueError("display token cannot carry seat_id")
+            if self.session_id is None:
+                raise ValueError("display token requires session_id")
+        return self
 
 
 def can_subscribe(
@@ -145,8 +170,9 @@ RoomUpdate = SessionReadyUpdate | PublicViewUpdate | SeatViewUpdate | HostContro
 
 class RoomSubscriber(Protocol):
     subscription_id: UUID
-    actor_type: Literal["seat", "host"]
+    actor_type: ActorType
     seat_id: int | None
+    session_id: UUID | None
     channels: frozenset[str]
 
     def offer(self, message: RoomUpdate) -> bool:
@@ -236,6 +262,7 @@ class TokenService:
         self.clock = clock
         self._records: dict[str, TokenRecord] = {}
         self._seat_records: dict[UUID, dict[int, TokenRecord]] = {}
+        self._display_records: dict[UUID, TokenRecord] = {}
 
     @staticmethod
     def digest(raw_token: str) -> str:
@@ -290,11 +317,39 @@ class TokenService:
             if record.expires_at > self.clock()
         }
 
+    def issue_display(self, room_id: UUID, ttl: timedelta) -> tuple[str, datetime]:
+        raw = self.source.token()
+        issued_at = self.clock()
+        expires_at = issued_at + ttl
+        record = TokenRecord(
+            token_digest=self.digest(raw),
+            room_id=room_id,
+            actor_type="display",
+            session_id=uuid4(),
+            issued_at=issued_at,
+            expires_at=expires_at,
+        )
+        previous = self._display_records.get(room_id)
+        self._records[record.token_digest] = record
+        self._display_records[room_id] = record
+        if previous is not None:
+            self._records.pop(previous.token_digest, None)
+        return raw, expires_at
+
+    def display_record(self, room_id: UUID) -> TokenRecord | None:
+        return self._display_records.get(room_id)
+
+    def revoke_display(self, room_id: UUID) -> None:
+        record = self._display_records.pop(room_id, None)
+        if record is not None:
+            self._records.pop(record.token_digest, None)
+
     def remove_room(self, room_id: UUID) -> None:
         for digest, record in tuple(self._records.items()):
             if record.room_id == room_id:
                 del self._records[digest]
         self._seat_records.pop(room_id, None)
+        self._display_records.pop(room_id, None)
 
 
 class RoomActor:
@@ -323,6 +378,8 @@ class RoomActor:
         self._timer_task: asyncio.Task[None] | None = None
         self._pending_futures: set[asyncio.Future[None] | asyncio.Future[RoomCommandAck]] = set()
         self.deadline_changed = asyncio.Event()
+        self.display_token_digest: str | None = None
+        self.display_session_id: UUID | None = None
 
     def current_deadline(self) -> datetime | None:
         return self.core.state.deadline_at
@@ -541,8 +598,8 @@ class RoomActor:
     @staticmethod
     def _subscriber_identity(
         subscriber: RoomSubscriber,
-    ) -> tuple[Literal["seat", "host"], int | None]:
-        return subscriber.actor_type, subscriber.seat_id
+    ) -> tuple[ActorType, int | None, UUID | None]:
+        return subscriber.actor_type, subscriber.seat_id, subscriber.session_id
 
     def _publish_updates(self) -> None:
         self.outbox_seq += 1
