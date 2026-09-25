@@ -19,9 +19,15 @@ from werewolf_dm.domain.model import (
     PrivateFact,
     PublicTimelineItem,
     StrictModel,
-    VoteSummary,
 )
+from werewolf_dm.domain.model import VoteSummary as BaseVoteSummary
 from werewolf_dm.domain.replay import event_log_digest
+
+
+# Vote progress is projection metadata; the persisted domain summary stays unchanged.
+class VoteSummary(BaseVoteSummary):
+    submitted_count: int = Field(default=0, ge=0)
+    eligible_count: int = Field(default=0, ge=0)
 
 
 class PublicView(StrictModel):
@@ -34,6 +40,7 @@ class PublicView(StrictModel):
     public_timeline: list[PublicTimelineItem]
     vote_summary: VoteSummary | None
     deadline_at: datetime | None
+    paused: bool = False
 
 
 class LegalAction(StrictModel):
@@ -95,6 +102,8 @@ def _active_vote_summary(state: GameState) -> VoteSummary | None:
         tallies=(),
         abstention_count=0,
         closed=False,
+        submitted_count=len({vote.voter_seat_id for vote in round_.votes}),
+        eligible_count=len(round_.eligible_voter_ids),
     )
 
 
@@ -303,6 +312,7 @@ def project_public_view(state: GameState) -> PublicView:
         public_timeline=list(state.public_timeline),
         vote_summary=_active_vote_summary(state),
         deadline_at=state.deadline_at,
+        paused=state.paused,
     )
 
 
@@ -340,6 +350,7 @@ def project_seat_view(
         public_timeline=list(state.public_timeline),
         vote_summary=_active_vote_summary(state),
         deadline_at=state.deadline_at,
+        paused=state.paused,
         seat_id=seat_id,
         role=player.role if player is not None else None,
         private_facts=tuple(

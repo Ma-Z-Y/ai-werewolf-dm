@@ -65,6 +65,7 @@ class AuthMessage(StrictModel):
 
 class SessionReadyMessage(StrictModel):
     type: Literal["session.ready"] = "session.ready"
+    server_time: datetime
     snapshot: RoomSnapshot
 
 
@@ -75,6 +76,7 @@ class SubscribeMessage(StrictModel):
 
 class PublicViewMessage(StrictModel):
     type: Literal["public.view.updated"] = "public.view.updated"
+    server_time: datetime
     outbox_seq: int
     public_view: PublicView
 
