@@ -1,6 +1,6 @@
 ---
 spec_id: verification-matrix
-version: 1.1.0
+version: 1.2.0
 status: frozen
 frozen_at: 2026-09-23
 owner: quality
@@ -8,9 +8,10 @@ depends_on:
   - product-constitution@1.1.0
   - rulepack-v1@1.1.0
   - system-design@1.1.0
+  - s3-frontend-constitution@1.1.0
 ---
 
-# AI 狼人杀 DM 验证矩阵 v1.1
+# AI 狼人杀 DM 验证矩阵 v1.2
 
 ## 1. 测试原则
 
@@ -312,7 +313,28 @@ Codex 环境下使用项目脚本和交付前检查等价实现，不依赖 Clau
 - 独立评估者未发现阻塞问题。
 - 规格、测试和实际行为一致。
 
-## 13. Changelog
+## 13. S3 Frontend And Protocol Preflight
+
+| ID | 场景 | 断言 |
+| --- | --- | --- |
+| `S3-P0-001` | display token 订阅 | 只获得 public；seat/host.control 返回 `CHANNEL_FORBIDDEN` |
+| `S3-P0-002` | display 命令 | 返回 `ACTOR_NOT_AUTHORIZED`，状态和 revision 不变 |
+| `S3-P0-003` | display 配对 | cross-room 拒绝；5 分钟到期；5 次失败失效；来源限流为 429 |
+| `S3-P0-004` | display 轮换 | 同 token 重连为 4003；轮换旧 session 为 4001；新 session 存活 |
+| `S3-P0-005` | 公共暂停 | `PublicView.paused` 与 `GameState.paused` 一致且不泄漏原因 |
+| `S3-P0-006` | 传输时间 | 四类 WS update 都含同一采样 `server_time`；纯投影不含该字段 |
+| `S3-P0-007` | 投票进度 | `DAY_VOTE`/`DAY_PK_VOTE` 只有 submitted/eligible 聚合计数 |
+| `S3-P0-008` | 公共时间线 | 只收公开事件；平安夜/平票/超时/暂停/恢复/终局均为中文稳定文案；不改变 state hash |
+| `S3-P0-009` | 生产测试面 | production app 的 OpenAPI、路由和实际请求均无 `/__test__` |
+| `S3-E2E-001` | 六浏览器真实对局 | 6 player + host + stage 使用动态 room code 到达 `GAME_END`，覆盖 PK、暂停、重连和截图 |
+| `S3-A11Y-001` | 320x568 | 主要玩家状态无水平溢出，可见按钮/链接/role=button 目标至少 44x44 |
+
+## 14. Changelog
+
+### v1.2.0 - 2026-09-25
+
+- 增加 S3-P0 display、配对、时间、投票、public timeline 和生产测试面测试。
+- 增加六浏览器 E2E 和 320x568 布局/触控验收。
 
 ### v1.1.0 - 2026-09-23
 
