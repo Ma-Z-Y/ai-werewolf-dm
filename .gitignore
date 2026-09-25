@@ -1,0 +1,50 @@
+# Local agent/project memory
+.projectmem/
+.planning/
+planning/
+AGENTS.md
+CLAUDE.md
+
+# Local process artifacts
+deliverables/
+docs/handoff/
+docs/superpowers/
+scripts/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+*.whl
+
+# Test and quality tooling
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Local environment
+.env
+.env.*
+!.env.example
+
+# Local archives
+*.zip
+*.7z
+*.rar

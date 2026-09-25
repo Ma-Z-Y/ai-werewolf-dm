@@ -1,0 +1,61 @@
+name: 缺陷报告
+description: 报告可复现的功能、契约或稳定性问题
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请先确认问题可以在最新 `main` 上复现。安全漏洞不要在这里提交。
+  - type: textarea
+    id: summary
+    attributes:
+      label: 问题摘要
+      description: 一句话说明实际行为与预期行为。
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 提供最小、确定性的复现步骤。
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期行为
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 证据
+      description: 粘贴已脱敏的日志、测试输出或 traceback。
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 版本或提交
+      placeholder: 分支、tag 或 commit SHA
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: 影响范围
+      options:
+        - 领域规则或状态机
+        - 投影或私密信息
+        - REST / WebSocket
+        - 房间、令牌或并发
+        - 测试、CI 或工具链
+        - 文档
+    validations:
+      required: true

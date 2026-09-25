@@ -1,0 +1,32 @@
+name: 功能请求
+description: 提议一个新能力或行为变化
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 要解决的问题
+      description: 描述用户场景和当前阻碍。
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: 期望结果
+      description: 描述可验证的成功标准。
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 备选方案
+      description: 说明考虑过的替代做法及其取舍。
+  - type: textarea
+    id: scope
+    attributes:
+      label: 范围与非目标
+      description: 明确这次要做什么，以及不做什么。
+    validations:
+      required: true
