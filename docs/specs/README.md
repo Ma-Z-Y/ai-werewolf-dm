@@ -8,4 +8,10 @@
 4. [验证矩阵](2026-09-23-verification-matrix.md)
 5. [S2 实时接口层设计 v1.2](2026-09-24-s2-realtime-interface-design.md)
 
+## S3 待复核提案
+
+- [S3 前端产品宪法提案 v0.1](2026-09-25-s3-frontend-constitution.md)
+  - 状态：`proposed`
+  - 用户复核通过前，不得编写冻结设计、实施计划或前端代码。
+
 实现必须同时读取本索引和上述规格。规格变更必须先于代码变更。
