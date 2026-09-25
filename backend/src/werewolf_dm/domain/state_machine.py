@@ -1,5 +1,6 @@
 import random
 from collections import Counter
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 from typing import Literal
 from uuid import NAMESPACE_URL, UUID, uuid5
@@ -7,6 +8,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from pydantic import JsonValue
 
 from werewolf_dm.domain.contracts import (
+    EVENT_PAYLOAD_MODELS,
     AbstainCommand,
     AbstainRecordedPayload,
     AuthenticatedActor,
@@ -66,6 +68,7 @@ from werewolf_dm.domain.model import (
     Player,
     PotionState,
     PrivateFact,
+    PublicTimelineItem,
     RoleAssignment,
     SeatTally,
     SeerCheckRecord,
@@ -117,6 +120,23 @@ PK_DISCUSSION_SECONDS = 30
 PK_VOTE_SECONDS = 20
 DeathCause = Literal["WOLF", "POISON", "MIXED"]
 WitchAction = Literal["ANTIDOTE", "POISON", "SKIP"]
+PHASE_STATEMENT_LABELS: dict[Phase, str] = {
+    Phase.LOBBY: "玩家准备",
+    Phase.ROLE_REVEAL: "角色揭示",
+    Phase.NIGHT_START: "夜晚开始",
+    Phase.NIGHT_WOLF: "狼人行动",
+    Phase.NIGHT_SEER: "预言家查验",
+    Phase.NIGHT_WITCH: "女巫行动",
+    Phase.NIGHT_RESOLVE: "夜间结算",
+    Phase.DAY_ANNOUNCE: "天亮公布",
+    Phase.DAY_DISCUSSION: "白天讨论",
+    Phase.DAY_VOTE: "白天投票",
+    Phase.DAY_PK_DISCUSSION: "PK 发言",
+    Phase.DAY_PK_VOTE: "PK 投票",
+    Phase.DAY_EXILE: "放逐结算",
+    Phase.WIN_CHECK: "胜负判定",
+    Phase.GAME_END: "游戏结束",
+}
 
 
 class ApplyOutcome(StrictModel):
@@ -340,6 +360,71 @@ def transition(
     validate_invariants(next_state)
     events.append(event)
     return next_state
+
+
+def _phase_statement_label(phase: Phase) -> str:
+    return PHASE_STATEMENT_LABELS[phase]
+
+
+def _public_statement(event: DomainEvent) -> str:
+    payload = EVENT_PAYLOAD_MODELS[event.event_type].validate_json_payload(event.fact_payload)
+    if isinstance(payload, PhaseChangedPayload):
+        return f"进入第 {payload.day} 天 · {_phase_statement_label(payload.next_phase)}"
+    if isinstance(payload, PlayersDiedPayload):
+        if not payload.seat_ids:
+            return "昨夜平安"
+        seats = "、".join(f"{seat_id} 号" for seat_id in payload.seat_ids)
+        return f"{seats} 玩家出局"
+    if isinstance(payload, RoomJoinedPayload):
+        return f"{payload.seat_id} 号玩家加入"
+    if isinstance(payload, ReadyChangedPayload):
+        state_text = "准备" if payload.ready else "取消准备"
+        return f"{payload.seat_id} 号玩家{state_text}"
+    if isinstance(payload, RoleConfirmedPayload):
+        return f"{payload.seat_id} 号玩家已确认角色"
+    if isinstance(payload, VoteRoundResolvedPayload):
+        if payload.tie:
+            return "投票平票"
+        if payload.exiled_seat_id is None:
+            return "本轮无人出局"
+        return f"{payload.exiled_seat_id} 号玩家被放逐"
+    if isinstance(payload, PlayerExiledPayload):
+        return f"{payload.seat_id} 号玩家被放逐"
+    if isinstance(payload, NoExilePayload):
+        return "本轮无人出局"
+    if isinstance(payload, TimeoutAppliedPayload):
+        return f"{_phase_statement_label(payload.phase)}阶段超时，系统自动推进"  # noqa: RUF001
+    if isinstance(payload, HostPausedPayload):
+        return "游戏已暂停"
+    if isinstance(payload, HostResumedPayload):
+        return "游戏已恢复"
+    if isinstance(payload, SpeechRecordedPayload):
+        return f"{payload.seat_id} 号玩家发言结束"
+    if isinstance(payload, SpeechPassedPayload):
+        return f"{payload.seat_id} 号玩家跳过发言"
+    if isinstance(payload, GameEndedPayload):
+        winner = "好人阵营" if payload.winner is Faction.GOOD else "狼人阵营"
+        return f"游戏结束：{winner}获胜"  # noqa: RUF001
+    return "公开事件已更新"
+
+
+def _append_public_timeline(
+    state: GameState,
+    events: Sequence[DomainEvent],
+) -> GameState:
+    public_items = tuple(
+        PublicTimelineItem(
+            event_id=event.event_id,
+            revision=event.revision,
+            event_type=event.event_type,
+            statement=_public_statement(event),
+        )
+        for event in events
+        if event.visibility.scope == "public"
+    )
+    if not public_items:
+        return state
+    return state.model_copy(update={"public_timeline": (*state.public_timeline, *public_items)})
 
 
 def _error(state: GameState, error_code: CommandErrorCode) -> ApplyOutcome:
@@ -2339,6 +2424,7 @@ def apply_command(
             "event_log_digest": next_event_log_digest,
         }
     )
+    next_state = _append_public_timeline(next_state, outcome.events)
     return ApplyOutcome(
         next_state=next_state,
         events=outcome.events,
