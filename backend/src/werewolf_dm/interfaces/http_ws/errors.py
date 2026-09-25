@@ -21,6 +21,7 @@ class ErrorCode(StrEnum):
     BAD_REQUEST = "BAD_REQUEST"
     ROOM_NOT_FOUND = "ROOM_NOT_FOUND"
     ROOM_FULL = "ROOM_FULL"
+    ROOM_LIMIT_REACHED = "ROOM_LIMIT_REACHED"
     TOKEN_INVALID = "TOKEN_INVALID"
     TOKEN_EXPIRED = "TOKEN_EXPIRED"
     CHANNEL_FORBIDDEN = "CHANNEL_FORBIDDEN"
@@ -45,6 +46,7 @@ SAFE_MESSAGES: dict[ErrorCode, str] = {
     ErrorCode.BAD_REQUEST: "请求不合法",
     ErrorCode.ROOM_NOT_FOUND: "房间不存在",
     ErrorCode.ROOM_FULL: "房间已满",
+    ErrorCode.ROOM_LIMIT_REACHED: "服务器房间容量已达上限",
     ErrorCode.TOKEN_INVALID: "令牌无效",
     ErrorCode.TOKEN_EXPIRED: "令牌已过期",
     ErrorCode.CHANNEL_FORBIDDEN: "频道不可用",
@@ -108,15 +110,17 @@ def sanitize_error(
     request_id: UUID | None = None,
 ) -> ErrorResponse:
     code = _map_exception(exc)
+    resolved_request_id = request_id or uuid4()
     if code is ErrorCode.INTERNAL_ERROR:
         logger.error(
-            "Unhandled server error sanitized for client",
-            exc_info=(type(exc), exc, exc.__traceback__),
+            "Unhandled server error sanitized for client request_id=%s exception_type=%s",
+            resolved_request_id,
+            type(exc).__name__,
         )
     return ErrorResponse(
         code=code,
         message=SAFE_MESSAGES[code],
-        request_id=request_id or uuid4(),
+        request_id=resolved_request_id,
     )
 
 

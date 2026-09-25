@@ -51,6 +51,9 @@ jobs:
       - name: Test
         run: python -m pytest -q
 
+      - name: Test latency guard
+        run: python -m pytest -q -m latency
+
       - name: Build wheel
         run: python -m pip wheel --no-deps --wheel-dir dist .
 

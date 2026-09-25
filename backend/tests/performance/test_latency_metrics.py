@@ -9,8 +9,10 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 
+from tests.factories import make_envelope
 from werewolf_dm.application.core import FrozenClock
 from werewolf_dm.application.rooms import RoomRegistry, SequenceTokenSource
+from werewolf_dm.domain.contracts import JoinRoomCommand
 from werewolf_dm.domain.state_machine import initial_state
 from werewolf_dm.domain.visibility import project_public_view
 from werewolf_dm.interfaces.http_ws.app import create_app
@@ -85,6 +87,7 @@ def test_metrics_endpoint_reports_strict_registry_and_latency_counters() -> None
         "slow_connection_closes": 1,
         "command_latency_ms_p95": 3.0,
         "broadcast_latency_ms_p95": 3.0,
+        "max_connection_queue_depth": 0,
     }
 
 
@@ -169,23 +172,52 @@ async def test_six_client_template_broadcast_p95_under_300ms() -> None:
 
 
 @pytest.mark.latency
-async def test_template_fallback_path_under_500ms() -> None:
+async def test_template_path_through_room_outbox_under_500ms() -> None:
     recorder = LatencyRecorder(window=100)
+    clock = FrozenClock(datetime.now(UTC))
+    registry = RoomRegistry(
+        clock=clock,
+        token_source=SequenceTokenSource(
+            tokens=("host", "seat-1"),
+            room_codes=("ROOM01",),
+        ),
+        seed_source=lambda: 101,
+    )
+    created = registry.create_room(timedelta(hours=1))
+    joined = registry.join_room(created.room_code, "Alice")
+    await registry.start_room(created.room_code)
+    room = registry.get_by_code(created.room_code)
+    record = registry.tokens.resolve(joined.seat_token)
+    actor = registry.actor_for(record)
     socket = RecordingSocket()
     sink = ConnectionSink(
         socket,
-        clock=FrozenClock(datetime.now(UTC)),
+        clock=clock,
         latency=recorder,
     )
     await sink.start()
-    fallback = make_message(outbox_seq=2)
-
-    started = perf_counter()
-    assert sink.offer(fallback)
+    sink.bind_actor(actor_type="seat", seat_id=record.seat_id)
+    await room.attach_subscriber(sink)
     await sink.drain()
-    recorder.observe_broadcast_ms((perf_counter() - started) * 1000.0)
+    envelope = make_envelope(
+        actor,
+        JoinRoomCommand(seat_id=1, display_name="Alice"),
+        expected_revision=0,
+        now=clock(),
+    )
 
-    assert recorder.broadcast_latency_ms_p95() < 500
+    try:
+        ack = await room.submit_command(envelope, actor)
+        await sink.drain()
+
+        assert ack.accepted is True
+        assert any(message["type"] == "public.view.updated" for message in socket.sent)
+        assert any(message["type"] == "seat.view.updated" for message in socket.sent)
+        measured_p95 = recorder.broadcast_latency_ms_p95()
+        assert 0.0 < measured_p95 < 500
+    finally:
+        await sink.close(1000)
+        await registry.remove_room(created.room_code)
 
 
 @pytest.mark.latency

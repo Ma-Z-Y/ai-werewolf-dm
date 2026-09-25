@@ -81,6 +81,10 @@ class RoomClosedError(RuntimeError):
     pass
 
 
+class RoomNotStartedError(RuntimeError):
+    pass
+
+
 class CreatedRoom(StrictModel):
     room_id: UUID
     room_code: str
@@ -146,6 +150,9 @@ class RoomSubscriber(Protocol):
     channels: frozenset[str]
 
     def offer(self, message: RoomUpdate) -> bool:
+        raise NotImplementedError
+
+    def request_close(self, code: int) -> None:
         raise NotImplementedError
 
 
@@ -311,6 +318,7 @@ class RoomActor:
         self.subscribers: dict[UUID, RoomSubscriber] = {}
         self.outbox_seq = 0
         self.closed = False
+        self._started = False
         self._task: asyncio.Task[None] | None = None
         self._timer_task: asyncio.Task[None] | None = None
         self._pending_futures: set[asyncio.Future[None] | asyncio.Future[RoomCommandAck]] = set()
@@ -331,6 +339,9 @@ class RoomActor:
 
     def _close(self, exc: BaseException) -> None:
         self.closed = True
+        for subscriber in tuple(self.subscribers.values()):
+            with contextlib.suppress(Exception):
+                subscriber.request_close(4001)
         self.subscribers.clear()
         self.deadline_changed.set()
         self._reject_pending_futures(exc)
@@ -342,6 +353,11 @@ class RoomActor:
         self._close(RoomClosedError("ROOM_CLOSED"))
 
     async def start(self) -> None:
+        if self.closed:
+            raise RoomClosedError("ROOM_CLOSED")
+        if self._started:
+            return
+        self._started = True
         if self._task is None:
             task = asyncio.create_task(self.run())
             self._task = task
@@ -368,7 +384,7 @@ class RoomActor:
         await self._cancel_timer_task()
         if self._task is not None:
             if task_was_done:
-                with contextlib.suppress(Exception):
+                with contextlib.suppress(Exception, asyncio.CancelledError):
                     self._task.result()
             else:
                 await self._task
@@ -379,6 +395,8 @@ class RoomActor:
         deadline_at: datetime,
         now: datetime,
     ) -> None:
+        if not self._started:
+            raise RoomNotStartedError("ROOM_NOT_STARTED")
         await self.events.put(
             TimerTickEvent(
                 revision=revision,
@@ -394,6 +412,8 @@ class RoomActor:
     ) -> RoomCommandAck:
         if self.closed:
             raise RoomClosedError("ROOM_CLOSED")
+        if not self._started:
+            raise RoomNotStartedError("ROOM_NOT_STARTED")
         future: asyncio.Future[RoomCommandAck] = asyncio.get_running_loop().create_future()
         self._pending_futures.add(future)
         await self.events.put(
@@ -411,6 +431,8 @@ class RoomActor:
     async def attach_subscriber(self, subscriber: RoomSubscriber) -> None:
         if self.closed:
             raise RoomClosedError("ROOM_CLOSED")
+        if not self._started:
+            raise RoomNotStartedError("ROOM_NOT_STARTED")
         future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         self._pending_futures.add(future)
         await self.events.put(
@@ -428,6 +450,8 @@ class RoomActor:
     async def publish_current(self, subscriber: RoomSubscriber) -> None:
         if self.closed:
             raise RoomClosedError("ROOM_CLOSED")
+        if not self._started:
+            raise RoomNotStartedError("ROOM_NOT_STARTED")
         future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         self._pending_futures.add(future)
         await self.events.put(
@@ -493,6 +517,13 @@ class RoomActor:
             if isinstance(event, AttachSubscriberEvent):
                 subscriber = event.subscriber
                 self.touch()
+                identity = self._subscriber_identity(subscriber)
+                for subscription_id, existing in tuple(self.subscribers.items()):
+                    if subscription_id == subscriber.subscription_id:
+                        continue
+                    if self._subscriber_identity(existing) == identity:
+                        self.subscribers.pop(subscription_id, None)
+                        existing.request_close(4003)
                 self.subscribers[subscriber.subscription_id] = subscriber
                 if event.initial:
                     subscriber.offer(SessionReadyUpdate(snapshot=self._snapshot_for(subscriber)))
@@ -506,6 +537,12 @@ class RoomActor:
                 self.subscribers.pop(event.subscription_id, None)
                 continue
             raise RuntimeError("UNHANDLED_ROOM_EVENT")
+
+    @staticmethod
+    def _subscriber_identity(
+        subscriber: RoomSubscriber,
+    ) -> tuple[Literal["seat", "host"], int | None]:
+        return subscriber.actor_type, subscriber.seat_id
 
     def _publish_updates(self) -> None:
         self.outbox_seq += 1
@@ -594,10 +631,17 @@ class RoomRegistry:
         clock: Clock,
         token_source: TokenSource,
         seed_source: Callable[[], int],
+        *,
+        max_rooms: int = 256,
+        max_connections: int = 1024,
     ) -> None:
+        if max_rooms <= 0 or max_connections <= 0:
+            raise ValueError("ROOM_LIMIT_INVALID")
         self.clock = clock
         self.tokens = TokenService(token_source, clock)
         self.seed_source = seed_source
+        self.max_rooms = max_rooms
+        self.max_connections = max_connections
         self.rooms: dict[str, RoomActor] = {}
         self.active_connections = 0
         self.auth_failures = 0
@@ -606,8 +650,11 @@ class RoomRegistry:
     def active_connection_count(self) -> int:
         return self.active_connections
 
-    def connection_opened(self) -> None:
+    def connection_opened(self) -> bool:
+        if self.active_connections >= self.max_connections:
+            return False
         self.active_connections += 1
+        return True
 
     def connection_closed(self, *, slow: bool = False) -> None:
         self.active_connections = max(0, self.active_connections - 1)
@@ -616,12 +663,13 @@ class RoomRegistry:
 
     def get_by_code(self, room_code: str) -> RoomActor:
         actor = self.rooms.get(room_code)
-        if actor is None:
+        if actor is None or actor.expires_at <= self.clock():
             raise ValueError("ROOM_NOT_FOUND")
         return actor
 
     def rooms_by_id(self) -> dict[UUID, RoomActor]:
-        return {actor.room_id: actor for actor in self.rooms.values()}
+        now = self.clock()
+        return {actor.room_id: actor for actor in self.rooms.values() if actor.expires_at > now}
 
     def actor_for(self, record: TokenRecord) -> AuthenticatedActor:
         return AuthenticatedActor(
@@ -675,6 +723,8 @@ class RoomRegistry:
         )
 
     def create_room(self, ttl: timedelta) -> CreatedRoom:
+        if len(self.rooms) >= self.max_rooms:
+            raise ValueError("ROOM_LIMIT_REACHED")
         room_id = uuid4()
         for _ in range(100):
             try:
@@ -685,16 +735,16 @@ class RoomRegistry:
                 break
         else:
             raise RuntimeError("ROOM_CODE_EXHAUSTED")
+        token, expires_at = self.tokens.issue_host(room_id, ttl)
         actor = RoomActor(
             room_id=room_id,
             room_code=room_code,
             seed=self.seed_source(),
             clock=self.clock,
-            expires_at=self.clock() + ttl,
+            expires_at=expires_at,
             last_activity_at=self.clock(),
         )
         self.rooms[room_code] = actor
-        token, expires_at = self.tokens.issue_host(room_id, ttl)
         return CreatedRoom(
             room_id=room_id,
             room_code=room_code,

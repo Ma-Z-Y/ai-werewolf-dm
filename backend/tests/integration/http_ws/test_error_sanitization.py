@@ -112,7 +112,8 @@ def test_error_code_is_strict_superset_and_unknown_errors_are_sanitized(
     assert sentinel not in serialized
     assert "Traceback" not in serialized
     assert "WEREWOLF" not in serialized
-    assert sentinel in caplog.text
+    assert sentinel not in caplog.text
+    assert "RuntimeError" in caplog.text
 
 
 def test_known_exception_codes_map_to_safe_messages_without_reflection() -> None:
