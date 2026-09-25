@@ -387,7 +387,7 @@ def _public_statement(event: DomainEvent) -> str:
             return "投票平票"
         if payload.exiled_seat_id is None:
             return "本轮无人出局"
-        return f"{payload.exiled_seat_id} 号玩家被放逐"
+        return f"投票结果：{payload.exiled_seat_id} 号玩家得票最多"  # noqa: RUF001
     if isinstance(payload, PlayerExiledPayload):
         return f"{payload.seat_id} 号玩家被放逐"
     if isinstance(payload, NoExilePayload):

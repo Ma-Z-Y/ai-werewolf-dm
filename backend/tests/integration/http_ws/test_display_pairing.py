@@ -557,6 +557,48 @@ def test_rotation_does_not_close_the_new_display_session(
             assert second.receive_json() == {"type": "pong"}
 
 
+def test_rotation_then_pause_only_updates_new_display_with_shared_server_time(
+    app_client: TestClient,
+    created: dict[str, str],
+    registry: RoomRegistry,
+) -> None:
+    first_display = _exchange_display(app_client, created)
+    with (
+        app_client.websocket_connect("/ws") as first,
+        app_client.websocket_connect("/ws") as host,
+    ):
+        _authenticate_display(first, first_display["display_token"])
+        _authenticate_display(host, created["host_token"])
+        second_display = _exchange_display(app_client, created)
+
+        with app_client.websocket_connect("/ws") as second:
+            _authenticate_display(second, second_display["display_token"])
+            with pytest.raises(WebSocketDisconnect) as exc_info:
+                while True:
+                    frame = first.receive_json()
+                    assert frame["type"] != "public.view.updated"
+            assert exc_info.value.code == 4001
+
+            room = registry.get_by_code(created["room_code"])
+            host.send_json(
+                _command_frame(
+                    created["room_id"],
+                    HostPauseCommand(reason="SECRET_REASON_SENTINEL"),
+                    expected_revision=room.core.state.revision,
+                )
+            )
+
+            display_update = second.receive_json()
+            host_public = host.receive_json()
+            assert display_update["type"] == "public.view.updated"
+            assert host_public["type"] == "public.view.updated"
+            assert display_update["server_time"] == host_public["server_time"]
+            assert display_update["public_view"]["paused"] is True
+            assert display_update["public_view"]["public_timeline"][-1]["statement"] == "游戏已暂停"
+            assert host.receive_json()["type"] == "host.control.updated"
+            assert host.receive_json()["type"] == "command.ack"
+
+
 def test_revoking_display_closes_existing_socket_with_4001(
     app_client: TestClient,
     created: dict[str, str],

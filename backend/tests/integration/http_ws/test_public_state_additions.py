@@ -26,8 +26,8 @@ from werewolf_dm.domain.model import GameState
 from werewolf_dm.domain.state_machine import initial_state
 from werewolf_dm.domain.visibility import (
     PublicView,
+    PublicVoteProgress,
     SeatView,
-    VoteSummary,
     project_public_view,
 )
 from werewolf_dm.interfaces.http_ws.app import create_app
@@ -265,7 +265,7 @@ def test_projection_models_have_no_server_time() -> None:
     assert "server_time" not in SeatView.model_fields
     assert "server_time" not in HostControlView.model_fields
     assert "server_time" not in RoomSnapshot.model_fields
-    assert "server_time" not in VoteSummary.model_fields
+    assert "server_time" not in PublicVoteProgress.model_fields
 
 
 def test_production_app_has_no_test_control_route() -> None:

@@ -12,6 +12,11 @@ from fastapi.testclient import TestClient
 from tests.factories import Scenario, core_at_wolf
 from werewolf_dm.application.core import FrozenClock
 from werewolf_dm.application.rooms import RoomActor, RoomRegistry, SequenceTokenSource
+from werewolf_dm.domain.contracts import (
+    AuthenticatedActor,
+    CommandEnvelope,
+    HostPauseCommand,
+)
 from werewolf_dm.interfaces.http_ws.app import create_app
 
 _START = datetime(2026, 9, 25, tzinfo=UTC)
@@ -114,6 +119,39 @@ def test_player_replay_contains_only_public_and_own_private_facts() -> None:
     assert "WOLF_DECISION" not in serialized
     assert "WEREWOLF" not in serialized
     assert "SEER" not in serialized
+
+
+def test_player_replay_redacts_host_pause_reason() -> None:
+    secret = "SECRET_REASON_SENTINEL"
+    with _export_client() as (client, _, scenario):
+        host = AuthenticatedActor(
+            actor_type="host",
+            seat_id=None,
+            room_id=scenario.core.state.room_id,
+        )
+        result = scenario.core.submit(
+            CommandEnvelope(
+                command_id=uuid4(),
+                room_id=scenario.core.state.room_id,
+                expected_revision=scenario.core.state.revision,
+                issued_at=_START,
+                payload=HostPauseCommand(reason=secret),
+            ),
+            host,
+        )
+        assert result.accepted is True
+
+        response = client.get(
+            f"/rooms/{_ROOM_CODE}/replay",
+            headers=_authorization(_SEAT_TOKEN),
+        )
+
+    assert response.status_code == 200
+    replay = response.json()
+    pause_events = [event for event in replay["events"] if event["event_type"] == "HOST_PAUSED"]
+    assert pause_events
+    assert all(event["fact_payload"]["reason"] == "主持人操作" for event in pause_events)
+    assert secret not in response.text
 
 
 def test_player_replay_cannot_request_dm_trace_or_snapshots() -> None:
