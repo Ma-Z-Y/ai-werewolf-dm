@@ -25,7 +25,7 @@ dependencies = [
   "httpx>=0.28,<1",
   "pydantic>=2.7,<3",
   "uvicorn[standard]>=0.35,<1",
-  "websockets>=15,<17",
+  "websockets>=15,<18",
 ]
 
 [project.urls]
@@ -35,10 +35,10 @@ Issues = "https://github.com/Ma-Z-Y/ai-werewolf-dm/issues"
 
 [project.optional-dependencies]
 dev = [
-  "pytest>=8.2,<9",
+  "pytest>=8.2,<10",
   "pytest-asyncio>=1,<2",
   "ruff>=0.6,<1",
-  "mypy>=1.11,<2",
+  "mypy>=1.11,<3",
 ]
 
 [tool.setuptools.packages.find]
