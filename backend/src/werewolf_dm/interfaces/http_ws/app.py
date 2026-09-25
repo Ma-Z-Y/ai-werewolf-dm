@@ -1,3 +1,5 @@
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import timedelta
 
 from fastapi import FastAPI, Request, WebSocket
@@ -10,6 +12,7 @@ from werewolf_dm.domain.visibility import ProjectionAccessError
 from werewolf_dm.interfaces.http_ws.errors import ErrorCode, ErrorResponse, sanitize_error
 from werewolf_dm.interfaces.http_ws.models import HealthResponse
 from werewolf_dm.interfaces.http_ws.rooms import router as rooms_router
+from werewolf_dm.interfaces.http_ws.runtime import build_production_registry
 from werewolf_dm.interfaces.http_ws.ws import router as ws_router
 
 
@@ -37,11 +40,18 @@ def _error_response(exc: Exception, *, status_code: int | None = None) -> JSONRe
     )
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    if app.state.room_registry is None:
+        app.state.room_registry = build_production_registry()
+    yield
+
+
 def create_app(
     registry: RoomRegistry | None = None,
     token_ttl: timedelta = timedelta(hours=6),
 ) -> FastAPI:
-    app = FastAPI(title="Werewolf DM S2", version="0.2.0")
+    app = FastAPI(title="Werewolf DM S2", version="0.2.0", lifespan=lifespan)
     app.state.room_registry = registry
     app.state.token_ttl = token_ttl
     app.include_router(rooms_router)
