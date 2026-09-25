@@ -6,13 +6,14 @@ import logging
 import secrets
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
-from typing import Literal, Protocol
+from typing import Protocol
 from uuid import UUID, uuid4
 
 from starlette.websockets import WebSocketDisconnect
 
 from werewolf_dm.application.core import Clock
 from werewolf_dm.application.rooms import RoomRegistry, SecretsTokenSource
+from werewolf_dm.domain.contracts import ActorType
 from werewolf_dm.domain.model import StrictModel
 from werewolf_dm.interfaces.http_ws.metrics import LatencyRecorder
 
@@ -77,8 +78,9 @@ class ConnectionSink:
         self.websocket = websocket
         self.clock = clock
         self.subscription_id: UUID = uuid4()
-        self.actor_type: Literal["seat", "host"] | None = None
+        self.actor_type: ActorType | None = None
         self.seat_id: int | None = None
+        self.session_id: UUID | None = None
         self.channels: frozenset[str] = frozenset()
         self.send_queue: asyncio.Queue[tuple[StrictModel, float]] = asyncio.Queue(
             maxsize=queue_size
@@ -101,20 +103,27 @@ class ConnectionSink:
     def bind_actor(
         self,
         *,
-        actor_type: Literal["seat", "host"],
+        actor_type: ActorType,
         seat_id: int | None,
+        session_id: UUID | None = None,
     ) -> None:
+        if actor_type == "display" and session_id is None:
+            raise ValueError("ACTOR_NOT_AUTHORIZED")
+        if actor_type != "display" and session_id is not None:
+            raise ValueError("ACTOR_NOT_AUTHORIZED")
         if actor_type == "seat" and seat_id is None:
             raise ValueError("ACTOR_NOT_AUTHORIZED")
-        if actor_type == "host" and seat_id is not None:
+        if actor_type in {"host", "display"} and seat_id is not None:
             raise ValueError("ACTOR_NOT_AUTHORIZED")
         self.actor_type = actor_type
         self.seat_id = seat_id
-        self.channels = (
-            frozenset({"public", "seat"})
-            if actor_type == "seat"
-            else frozenset({"public", "host.control"})
-        )
+        self.session_id = session_id
+        if actor_type == "display":
+            self.channels = frozenset({"public"})
+        elif actor_type == "seat":
+            self.channels = frozenset({"public", "seat"})
+        else:
+            self.channels = frozenset({"public", "host.control"})
 
     def set_channels(self, channels: frozenset[str]) -> None:
         self.channels = channels

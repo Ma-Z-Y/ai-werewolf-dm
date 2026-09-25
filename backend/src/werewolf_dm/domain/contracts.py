@@ -187,18 +187,20 @@ HostCommand = (
 
 CommandPayload = Annotated[PlayerCommand | HostCommand, Field(discriminator="command_type")]
 
+ActorType = Literal["seat", "host", "display"]
+
 
 class AuthenticatedActor(StrictModel):
-    actor_type: Literal["seat", "host"]
+    actor_type: ActorType
     seat_id: int | None = Field(default=None, ge=1, le=6)
     room_id: UUID
 
     @model_validator(mode="after")
-    def validate_seat_shape(self) -> Self:
+    def validate_actor_shape(self) -> Self:
         if self.actor_type == "seat" and self.seat_id is None:
             raise ValueError("seat actor requires seat_id")
-        if self.actor_type == "host" and self.seat_id is not None:
-            raise ValueError("host actor cannot carry seat_id")
+        if self.actor_type in {"host", "display"} and self.seat_id is not None:
+            raise ValueError(f"{self.actor_type} actor cannot carry seat_id")
         return self
 
 

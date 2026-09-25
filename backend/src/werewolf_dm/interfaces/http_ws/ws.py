@@ -250,7 +250,11 @@ async def websocket_session(websocket: WebSocket) -> None:
             return
 
         sink.record_client_activity()
-        sink.bind_actor(actor_type=actor.actor_type, seat_id=actor.seat_id)
+        sink.bind_actor(
+            actor_type=actor.actor_type,
+            seat_id=actor.seat_id,
+            session_id=record.session_id,
+        )
         try:
             await room.attach_subscriber(cast(RoomSubscriber, sink))
         except RoomClosedError:

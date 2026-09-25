@@ -156,6 +156,7 @@ class FakeSubscriber:
         self.subscription_id = uuid4()
         self.actor_type = actor_type
         self.seat_id = seat_id
+        self.session_id = None
         self.channels = frozenset({"public", "seat"})
         self.close_codes: list[int] = []
 
