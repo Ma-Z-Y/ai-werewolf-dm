@@ -613,6 +613,14 @@ class RoomActor:
                 continue
             if isinstance(event, AttachSubscriberEvent):
                 subscriber = event.subscriber
+                if (
+                    subscriber.actor_type == "display"
+                    and subscriber.session_id != self.display_session_id
+                ):
+                    subscriber.request_close(4001)
+                    if not event.result.done():
+                        event.result.set_result(None)
+                    continue
                 self.touch()
                 identity = self._subscriber_identity(subscriber)
                 for subscription_id, existing in tuple(self.subscribers.items()):
@@ -643,7 +651,14 @@ class RoomActor:
 
     def _publish_updates(self) -> None:
         self.outbox_seq += 1
-        for subscriber in tuple(self.subscribers.values()):
+        for subscription_id, subscriber in tuple(self.subscribers.items()):
+            if (
+                subscriber.actor_type == "display"
+                and subscriber.session_id != self.display_session_id
+            ):
+                self.subscribers.pop(subscription_id, None)
+                subscriber.request_close(4001)
+                continue
             self._publish_current_to(subscriber)
 
     def _snapshot_for(self, subscriber: RoomSubscriber) -> RoomSnapshot:
@@ -681,6 +696,9 @@ class RoomActor:
         )
 
     def _publish_current_to(self, subscriber: RoomSubscriber) -> None:
+        if subscriber.actor_type == "display" and subscriber.session_id != self.display_session_id:
+            subscriber.request_close(4001)
+            return
         public = project_public_view(self.core.state)
         if "public" in subscriber.channels:
             subscriber.offer(
