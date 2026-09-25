@@ -118,6 +118,28 @@ class IdleProtocolSocket:
         raise WebSocketDisconnect(1000)
 
 
+class TokenExpirySocket:
+    def __init__(self, clock: MutableClock, *, timeout: bool) -> None:
+        self.clock = clock
+        self.timeout = timeout
+        self.close_codes: list[int] = []
+
+    async def accept(self) -> None:
+        pass
+
+    async def send_json(self, data: dict[str, object]) -> None:
+        del data
+
+    async def close(self, code: int = 1000) -> None:
+        self.close_codes.append(code)
+
+    async def receive_json(self) -> object:
+        self.clock.advance(11)
+        if self.timeout:
+            raise TimeoutError
+        return {"type": "ping"}
+
+
 class FailingTokenSource:
     def __init__(self) -> None:
         self.room_codes = iter(("ROOM01", "ROOM02"))
@@ -268,6 +290,52 @@ async def test_authenticated_message_loop_closes_when_token_expires() -> None:
 
 
 @pytest.mark.asyncio
+async def test_token_expires_while_waiting_for_receive() -> None:
+    clock = MutableClock(datetime(2026, 9, 25, tzinfo=UTC))
+    record = TokenRecord(
+        token_digest="digest",
+        room_id=UUID(int=1),
+        actor_type="seat",
+        seat_id=1,
+        issued_at=clock(),
+        expires_at=clock() + timedelta(seconds=10),
+    )
+    socket = TokenExpirySocket(clock, timeout=True)
+    sink = ConnectionSink(socket, clock=clock)
+    await sink.start()
+
+    await asyncio.wait_for(
+        message_loop(socket, sink, record=record, idle_timeout=60.0),
+        timeout=0.5,
+    )
+
+    assert socket.close_codes == [4001]
+
+
+@pytest.mark.asyncio
+async def test_token_expires_after_message_is_received() -> None:
+    clock = MutableClock(datetime(2026, 9, 25, tzinfo=UTC))
+    record = TokenRecord(
+        token_digest="digest",
+        room_id=UUID(int=1),
+        actor_type="seat",
+        seat_id=1,
+        issued_at=clock(),
+        expires_at=clock() + timedelta(seconds=10),
+    )
+    socket = TokenExpirySocket(clock, timeout=False)
+    sink = ConnectionSink(socket, clock=clock)
+    await sink.start()
+
+    await asyncio.wait_for(
+        message_loop(socket, sink, record=record, idle_timeout=60.0),
+        timeout=0.5,
+    )
+
+    assert socket.close_codes == [4001]
+
+
+@pytest.mark.asyncio
 async def test_room_stop_requests_subscriber_close_and_loop_rejects_closed_room() -> None:
     now = datetime(2026, 9, 25, tzinfo=UTC)
     actor = RoomActor(
@@ -345,6 +413,42 @@ async def test_same_actor_attach_replaces_old_subscriber() -> None:
         assert old.close_codes == [4003]
         assert tuple(actor.subscribers.values()) == (new,)
     finally:
+        await actor.stop()
+
+
+@pytest.mark.asyncio
+async def test_same_actor_attach_replaces_real_connection_sinks() -> None:
+    now = datetime(2026, 9, 25, tzinfo=UTC)
+    clock = FrozenClock(now)
+    actor = RoomActor(
+        room_id=UUID(int=1),
+        room_code="ROOM01",
+        seed=101,
+        clock=clock,
+        expires_at=now + timedelta(hours=1),
+        last_activity_at=now,
+    )
+    old_socket = ScriptedSocket([])
+    new_socket = ScriptedSocket([])
+    old_sink = ConnectionSink(old_socket, clock=clock)
+    new_sink = ConnectionSink(new_socket, clock=clock)
+    await actor.start()
+    await old_sink.start()
+    await new_sink.start()
+    old_sink.bind_actor(actor_type="seat", seat_id=1)
+    new_sink.bind_actor(actor_type="seat", seat_id=1)
+
+    try:
+        await actor.attach_subscriber(old_sink)
+        await actor.attach_subscriber(new_sink)
+        await asyncio.wait_for(old_sink.wait_closed(), timeout=0.5)
+
+        assert old_sink.close_code == 4003
+        assert old_socket.close_codes == [4003]
+        assert new_sink.close_code is None
+        assert tuple(actor.subscribers.values()) == (new_sink,)
+    finally:
+        await new_sink.close(1000)
         await actor.stop()
 
 
