@@ -2,14 +2,32 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from datetime import datetime, timedelta
+import secrets
+from datetime import UTC, datetime, timedelta
 from typing import Literal, Protocol
 from uuid import UUID, uuid4
 
 from starlette.websockets import WebSocketDisconnect
 
 from werewolf_dm.application.core import Clock
+from werewolf_dm.application.rooms import RoomRegistry, SecretsTokenSource
 from werewolf_dm.domain.model import StrictModel
+
+
+class RealClock:
+    def __call__(self) -> datetime:
+        return datetime.now(UTC)
+
+    def set(self, now: datetime) -> None:
+        del now
+
+
+def build_production_registry() -> RoomRegistry:
+    return RoomRegistry(
+        clock=RealClock(),
+        token_source=SecretsTokenSource(),
+        seed_source=lambda: secrets.randbits(63),
+    )
 
 
 class WebSocketLike(Protocol):

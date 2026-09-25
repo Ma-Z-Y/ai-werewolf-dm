@@ -11,6 +11,8 @@
 - S2 FastAPI/WebSocket 实时接口骨架。
 - 房间注册表、签名令牌、单写者 RoomActor 和限速连接。
 - REST 房间创建/加入、WebSocket 首帧认证、公共/座位频道和命令桥。
+- 真实 UTC 时钟、FastAPI lifespan 生产 registry，以及暂停、恢复和竞态
+  安全的 `TimerScheduler`。
 - 严格错误白名单、全局异常处理器和 VIS-007 泄漏回归。
 - GitHub Actions CI、CodeQL、Dependabot 和开源协作模板。
 - Wheel 内置 Apache-2.0 许可文本和 PEP 561 `py.typed` 标记。
