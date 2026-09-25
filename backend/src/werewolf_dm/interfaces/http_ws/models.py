@@ -38,6 +38,21 @@ class JoinRoomResponse(StrictModel):
     expires_at: datetime
 
 
+class DisplayPairingResponse(StrictModel):
+    pairing_code: str = Field(pattern=r"^[0-9]{6}$")
+    expires_at: datetime
+
+
+class DisplaySessionExchangeRequest(StrictModel):
+    pairing_code: str = Field(pattern=r"^[0-9]{6}$")
+
+
+class DisplaySessionResponse(StrictModel):
+    room_id: UUID
+    display_token: str
+    expires_at: datetime
+
+
 class AuthRequiredMessage(StrictModel):
     type: Literal["auth.required"] = "auth.required"
 

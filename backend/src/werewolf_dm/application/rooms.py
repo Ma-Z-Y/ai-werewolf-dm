@@ -87,6 +87,14 @@ class TokenRecord(StrictModel):
         return self
 
 
+@dataclass(slots=True)
+class DisplayPairing:
+    pairing_code_digest: str
+    room_id: UUID
+    expires_at: datetime
+    failed_attempts: int = 0
+
+
 def can_subscribe(
     record: TokenRecord,
     channel: str,
@@ -205,6 +213,11 @@ class TimerTickEvent:
 
 
 @dataclass(slots=True)
+class SyncDisplaySessionEvent:
+    active_session_id: UUID | None
+
+
+@dataclass(slots=True)
 class AttachSubscriberEvent:
     subscriber: RoomSubscriber
     result: asyncio.Future[None]
@@ -222,7 +235,12 @@ class StopEvent:
 
 
 RoomEvent = (
-    SubmitCommandEvent | TimerTickEvent | AttachSubscriberEvent | DetachSubscriberEvent | StopEvent
+    SubmitCommandEvent
+    | TimerTickEvent
+    | SyncDisplaySessionEvent
+    | AttachSubscriberEvent
+    | DetachSubscriberEvent
+    | StopEvent
 )
 
 
@@ -317,10 +335,20 @@ class TokenService:
             if record.expires_at > self.clock()
         }
 
-    def issue_display(self, room_id: UUID, ttl: timedelta) -> tuple[str, datetime]:
-        raw = self.source.token()
+    def issue_display(
+        self,
+        room_id: UUID,
+        ttl: timedelta,
+        *,
+        room_expires_at: datetime | None = None,
+    ) -> tuple[str, datetime]:
         issued_at = self.clock()
+        if room_expires_at is not None and room_expires_at <= issued_at:
+            raise ValueError("ROOM_NOT_FOUND")
+        raw = self.source.token()
         expires_at = issued_at + ttl
+        if room_expires_at is not None:
+            expires_at = min(expires_at, room_expires_at)
         record = TokenRecord(
             token_digest=self.digest(raw),
             room_id=room_id,
@@ -383,6 +411,9 @@ class RoomActor:
 
     def current_deadline(self) -> datetime | None:
         return self.core.state.deadline_at
+
+    def sync_display_session(self) -> None:
+        self.events.put_nowait(SyncDisplaySessionEvent(active_session_id=self.display_session_id))
 
     def touch(self) -> None:
         self.last_activity_at = self.clock()
@@ -571,6 +602,15 @@ class RoomActor:
                         self._publish_updates()
                     self.deadline_changed.set()
                 continue
+            if isinstance(event, SyncDisplaySessionEvent):
+                for subscription_id, subscriber in tuple(self.subscribers.items()):
+                    if (
+                        subscriber.actor_type == "display"
+                        and subscriber.session_id != event.active_session_id
+                    ):
+                        self.subscribers.pop(subscription_id, None)
+                        subscriber.request_close(4001)
+                continue
             if isinstance(event, AttachSubscriberEvent):
                 subscriber = event.subscriber
                 self.touch()
@@ -703,6 +743,8 @@ class RoomRegistry:
         self.active_connections = 0
         self.auth_failures = 0
         self.slow_connection_closes = 0
+        self._display_pairings: dict[UUID, DisplayPairing] = {}
+        self._pairing_attempts: dict[tuple[UUID, str], tuple[datetime, int]] = {}
 
     def active_connection_count(self) -> int:
         return self.active_connections
@@ -832,6 +874,68 @@ class RoomRegistry:
             expires_at=expires_at,
         )
 
+    def allow_pairing_attempt(self, room_id: UUID, source: str) -> bool:
+        now = self.clock()
+        window_start, count = self._pairing_attempts.get(
+            (room_id, source),
+            (now, 0),
+        )
+        if (now - window_start).total_seconds() >= 60:
+            window_start, count = now, 0
+        if count >= 10:
+            return False
+        self._pairing_attempts[(room_id, source)] = (window_start, count + 1)
+        return True
+
+    def create_display_pairing(self, room_code: str) -> tuple[str, datetime]:
+        room = self.get_by_code(room_code)
+        raw = f"{secrets.randbelow(1_000_000):06d}"
+        expires_at = self.clock() + timedelta(minutes=5)
+        self._display_pairings[room.room_id] = DisplayPairing(
+            pairing_code_digest=self.tokens.digest(raw),
+            room_id=room.room_id,
+            expires_at=expires_at,
+        )
+        return raw, expires_at
+
+    def exchange_display_pairing(
+        self,
+        room_code: str,
+        pairing_code: str,
+        source: str,
+    ) -> tuple[UUID, str, datetime]:
+        room = self.get_by_code(room_code)
+        if not self.allow_pairing_attempt(room.room_id, source):
+            raise ValueError("RATE_LIMITED")
+        pairing = self._display_pairings.get(room.room_id)
+        now = self.clock()
+        if pairing is None or pairing.expires_at <= now:
+            raise ValueError("TOKEN_INVALID")
+        if self.tokens.digest(pairing_code) != pairing.pairing_code_digest:
+            pairing.failed_attempts += 1
+            if pairing.failed_attempts >= 5:
+                self._display_pairings.pop(room.room_id, None)
+            raise ValueError("TOKEN_INVALID")
+        self._display_pairings.pop(room.room_id, None)
+        raw, expires_at = self.tokens.issue_display(
+            room.room_id,
+            timedelta(hours=1),
+            room_expires_at=room.expires_at,
+        )
+        record = self.tokens.display_record(room.room_id)
+        assert record is not None and record.session_id is not None
+        room.display_session_id = record.session_id
+        room.display_token_digest = self.tokens.digest(raw)
+        room.sync_display_session()
+        return room.room_id, raw, expires_at
+
+    def revoke_display(self, room_code: str) -> None:
+        room = self.get_by_code(room_code)
+        self.tokens.revoke_display(room.room_id)
+        room.display_token_digest = None
+        room.display_session_id = None
+        room.sync_display_session()
+
     async def start_room(self, room_code: str) -> None:
         actor = self.get_by_code(room_code)
         await actor.start()
@@ -842,6 +946,10 @@ class RoomRegistry:
             try:
                 await actor.stop()
             finally:
+                self._display_pairings.pop(actor.room_id, None)
+                for key in tuple(self._pairing_attempts):
+                    if key[0] == actor.room_id:
+                        del self._pairing_attempts[key]
                 self.tokens.remove_room(actor.room_id)
 
     async def reap_expired(self) -> int:
