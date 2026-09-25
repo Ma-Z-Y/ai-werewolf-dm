@@ -82,6 +82,13 @@ async def test_seat_channel_publishes_own_authenticated_projection() -> None:
         "public.view.updated",
         "seat.view.updated",
     ]
+    assert set(socket.sent[1]) == {
+        "type",
+        "server_time",
+        "outbox_seq",
+        "seat_id",
+        "seat_view",
+    }
     parsed = SeatViewUpdate.validate_json_payload(socket.sent[1])
     actor = registry.actor_for(record)
 

@@ -20,6 +20,8 @@ from werewolf_dm.interfaces.http_ws.metrics import LatencyRecorder
 from werewolf_dm.interfaces.http_ws.models import CommandAckMessage, PublicViewMessage
 from werewolf_dm.interfaces.http_ws.runtime import ConnectionSink
 
+SERVER_TIME = datetime(2026, 9, 25, tzinfo=UTC)
+
 
 class RecordingSocket:
     def __init__(self) -> None:
@@ -61,6 +63,7 @@ def make_message(outbox_seq: int = 1) -> PublicViewMessage:
     return PublicViewMessage(
         outbox_seq=outbox_seq,
         public_view=project_public_view(initial_state(room_id, 101)),
+        server_time=SERVER_TIME,
     )
 
 

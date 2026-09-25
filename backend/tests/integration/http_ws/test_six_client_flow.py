@@ -64,6 +64,7 @@ PUBLIC_VIEW_KEYS = frozenset(
         "public_timeline",
         "vote_summary",
         "deadline_at",
+        "paused",
     }
 )
 
@@ -300,7 +301,7 @@ def capture_public_message(
     state: GameState,
     public_count: int,
 ) -> int:
-    if set(message) != {"type", "outbox_seq", "public_view"}:
+    if set(message) != {"type", "server_time", "outbox_seq", "public_view"}:
         raise AssertionError(f"unexpected public message shape: {message!r}")
     public_view = cast(dict[str, Any], message["public_view"])
     if set(public_view) != PUBLIC_VIEW_KEYS:
@@ -343,6 +344,7 @@ def receive_broadcasts(
         expected_revision = room.core.state.revision
         expected_phase = room.core.state.phase.value
         expected_paused = room.core.state.paused
+        server_time = public["server_time"]
         public_view = cast(dict[str, Any], public["public_view"])
         assert_public_view_matches_state(
             public_view,
@@ -353,6 +355,8 @@ def receive_broadcasts(
         seat_view = receive_type(seat, "seat.view.updated")
         if seat_view["seat_id"] != seat_index + 1:
             raise AssertionError(f"seat {seat_index + 1} received {seat_view!r}")
+        if seat_view["server_time"] != server_time:
+            raise AssertionError("seat and public updates used different server_time samples")
         assert_public_view_matches_state(
             seat_view["seat_view"],
             revision=expected_revision,
@@ -362,6 +366,8 @@ def receive_broadcasts(
             raise AssertionError("seat update and public update outbox_seq diverged")
 
     host_public = receive_type(host, "public.view.updated")
+    if host_public["server_time"] != server_time:
+        raise AssertionError("host and seat updates used different server_time samples")
     assert_public_view_matches_state(
         cast(dict[str, Any], host_public["public_view"]),
         revision=expected_revision,
@@ -369,6 +375,8 @@ def receive_broadcasts(
     )
     public_count = capture_public_message(host_public, room.core.state, public_count)
     host_control = receive_type(host, "host.control.updated")
+    if host_control["server_time"] != server_time:
+        raise AssertionError("host control used a different server_time sample")
     assert_public_view_matches_state(
         host_control["host_control"]["public_view"],
         revision=expected_revision,
@@ -687,6 +695,8 @@ def test_six_client_end_to_end_service_flow() -> None:
                     joined_seat["seat_token"],
                 )
                 seats.append(socket_)
+                if "server_time" not in ready:
+                    raise AssertionError("seat session.ready did not carry server_time")
                 seat_view = ready["snapshot"]["seat_view"]
                 if seat_view is None or seat_view["seat_id"] != seat_id:
                     raise AssertionError("session.ready seat binding is incorrect")
@@ -699,7 +709,8 @@ def test_six_client_end_to_end_service_flow() -> None:
                 created["host_token"],
             )
             if (
-                host_ready["snapshot"]["host_control"] is None
+                "server_time" not in host_ready
+                or host_ready["snapshot"]["host_control"] is None
                 or host_ready["snapshot"]["seat_view"] is not None
             ):
                 raise AssertionError("host session.ready shape is incorrect")
@@ -901,7 +912,8 @@ def test_six_client_end_to_end_service_flow() -> None:
                 display_response.json()["display_token"],
             )
             if (
-                display_ready["snapshot"]["seat_view"] is not None
+                "server_time" not in display_ready
+                or display_ready["snapshot"]["seat_view"] is not None
                 or display_ready["snapshot"]["host_control"] is not None
                 or display_ready["snapshot"]["public_view"] is None
             ):

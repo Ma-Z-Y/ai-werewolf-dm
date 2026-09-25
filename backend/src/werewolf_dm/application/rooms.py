@@ -151,12 +151,14 @@ class RoomSnapshot(StrictModel):
 
 class PublicViewUpdate(StrictModel):
     type: Literal["public.view.updated"] = "public.view.updated"
+    server_time: datetime
     outbox_seq: int
     public_view: PublicView
 
 
 class SeatViewUpdate(StrictModel):
     type: Literal["seat.view.updated"] = "seat.view.updated"
+    server_time: datetime
     outbox_seq: int
     seat_id: int = Field(ge=1, le=6)
     seat_view: SeatView
@@ -164,12 +166,14 @@ class SeatViewUpdate(StrictModel):
 
 class HostControlUpdate(StrictModel):
     type: Literal["host.control.updated"] = "host.control.updated"
+    server_time: datetime
     outbox_seq: int
     host_control: HostControlView
 
 
 class SessionReadyUpdate(StrictModel):
     type: Literal["session.ready"] = "session.ready"
+    server_time: datetime
     snapshot: RoomSnapshot
 
 
@@ -415,8 +419,8 @@ class RoomActor:
     def sync_display_session(self) -> None:
         self.events.put_nowait(SyncDisplaySessionEvent(active_session_id=self.display_session_id))
 
-    def touch(self) -> None:
-        self.last_activity_at = self.clock()
+    def touch(self, *, now: datetime | None = None) -> None:
+        self.last_activity_at = self.clock() if now is None else now
 
     def _reject_pending_futures(self, exc: BaseException) -> None:
         failure = RoomClosedError("ROOM_CLOSED") if isinstance(exc, asyncio.CancelledError) else exc
@@ -621,7 +625,8 @@ class RoomActor:
                     if not event.result.done():
                         event.result.set_result(None)
                     continue
-                self.touch()
+                now = self.clock()
+                self.touch(now=now)
                 identity = self._subscriber_identity(subscriber)
                 for subscription_id, existing in tuple(self.subscribers.items()):
                     if subscription_id == subscriber.subscription_id:
@@ -631,9 +636,14 @@ class RoomActor:
                         existing.request_close(4003)
                 self.subscribers[subscriber.subscription_id] = subscriber
                 if event.initial:
-                    subscriber.offer(SessionReadyUpdate(snapshot=self._snapshot_for(subscriber)))
+                    subscriber.offer(
+                        SessionReadyUpdate(
+                            server_time=now,
+                            snapshot=self._snapshot_for(subscriber),
+                        )
+                    )
                 else:
-                    self._publish_current_to(subscriber)
+                    self._publish_current_to(subscriber, server_time=now)
                 if not event.result.done():
                     event.result.set_result(None)
                 continue
@@ -651,6 +661,7 @@ class RoomActor:
 
     def _publish_updates(self) -> None:
         self.outbox_seq += 1
+        server_time = self.clock()
         for subscription_id, subscriber in tuple(self.subscribers.items()):
             if (
                 subscriber.actor_type == "display"
@@ -659,7 +670,7 @@ class RoomActor:
                 self.subscribers.pop(subscription_id, None)
                 subscriber.request_close(4001)
                 continue
-            self._publish_current_to(subscriber)
+            self._publish_current_to(subscriber, server_time=server_time)
 
     def _snapshot_for(self, subscriber: RoomSubscriber) -> RoomSnapshot:
         public = project_public_view(self.core.state)
@@ -695,7 +706,12 @@ class RoomActor:
             host_control=host_control,
         )
 
-    def _publish_current_to(self, subscriber: RoomSubscriber) -> None:
+    def _publish_current_to(
+        self,
+        subscriber: RoomSubscriber,
+        *,
+        server_time: datetime,
+    ) -> None:
         if subscriber.actor_type == "display" and subscriber.session_id != self.display_session_id:
             subscriber.request_close(4001)
             return
@@ -703,6 +719,7 @@ class RoomActor:
         if "public" in subscriber.channels:
             subscriber.offer(
                 PublicViewUpdate(
+                    server_time=server_time,
                     outbox_seq=self.outbox_seq,
                     public_view=public,
                 )
@@ -714,6 +731,7 @@ class RoomActor:
         ):
             subscriber.offer(
                 SeatViewUpdate(
+                    server_time=server_time,
                     outbox_seq=self.outbox_seq,
                     seat_id=subscriber.seat_id,
                     seat_view=project_seat_view(
@@ -730,6 +748,7 @@ class RoomActor:
         if subscriber.actor_type == "host" and "host.control" in subscriber.channels:
             subscriber.offer(
                 HostControlUpdate(
+                    server_time=server_time,
                     outbox_seq=self.outbox_seq,
                     host_control=HostControlView(
                         public_view=public,

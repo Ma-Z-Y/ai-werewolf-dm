@@ -20,6 +20,7 @@ PUBLIC_VIEW_KEYS = {
     "public_timeline",
     "vote_summary",
     "deadline_at",
+    "paused",
 }
 
 
@@ -56,7 +57,15 @@ def test_vis_006_public_channel_sends_projection_baseline_without_private_fields
             socket.send_json({"type": "subscribe", "channel": "public"})
             message = socket.receive_json()
 
-            assert PublicViewMessage.validate_json_payload(message).type == "public.view.updated"
+            parsed = PublicViewMessage.validate_json_payload(message)
+            assert parsed.type == "public.view.updated"
+            assert set(message) == {
+                "type",
+                "server_time",
+                "outbox_seq",
+                "public_view",
+            }
+            assert message["server_time"] == ready["server_time"]
             assert set(message["public_view"]) == PUBLIC_VIEW_KEYS
             assert "seat_id" not in message["public_view"]
             assert "private_facts" not in message["public_view"]
