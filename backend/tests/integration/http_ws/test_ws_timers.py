@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import cast
@@ -19,6 +19,7 @@ from tests.factories import (
 from werewolf_dm.application.core import FrozenClock, GameCore
 from werewolf_dm.application.rooms import (
     RoomActor,
+    RoomClosedError,
     RoomRegistry,
     SequenceTokenSource,
     TimerScheduler,
@@ -99,6 +100,32 @@ def test_create_app_lifespan_injects_production_registry_only_when_missing() -> 
 
     provided = make_registry()
     provided_app = create_app(provided)
+    with TestClient(provided_app):
+        assert provided_app.state.room_registry is provided
+
+
+def test_create_app_lifespan_recreates_owned_registry_and_preserves_injected() -> None:
+    owned_app = create_app()
+
+    with TestClient(owned_app) as client:
+        first_registry = cast(RoomRegistry, owned_app.state.room_registry)
+        created = client.post("/rooms", json={"display_name": "Host"})
+        assert created.status_code == 201
+        assert first_registry.rooms
+
+    assert first_registry.rooms == {}
+    assert owned_app.state.room_registry is None
+
+    with TestClient(owned_app) as client:
+        second_registry = cast(RoomRegistry, owned_app.state.room_registry)
+        assert second_registry is not first_registry
+        assert second_registry.rooms == {}
+        assert client.get("/healthz").status_code == 200
+
+    provided = make_registry()
+    provided_app = create_app(provided)
+    with TestClient(provided_app):
+        assert provided_app.state.room_registry is provided
     with TestClient(provided_app):
         assert provided_app.state.room_registry is provided
 
@@ -290,3 +317,106 @@ async def test_scheduler_rereads_deadline_changed_during_clear() -> None:
 
     assert actor.raced is True
     assert actor.ticks == [(0, actor.changed_deadline, clock())]
+
+
+@pytest.mark.asyncio
+async def test_actor_cancelled_before_first_scheduling_closes_lifecycle() -> None:
+    actor = make_actor(core_at_role_reveal())
+    await actor.start()
+    assert actor._task is not None
+    future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    actor._pending_futures.add(future)
+
+    actor._task.cancel()
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await actor._task
+
+        assert actor.closed is True
+        with pytest.raises(RoomClosedError):
+            await asyncio.wait_for(future, timeout=0.5)
+        assert actor._timer_task is not None
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(actor._timer_task, timeout=0.5)
+        assert actor._timer_task.done()
+    finally:
+        timer_task = actor._timer_task
+        if timer_task is not None and not timer_task.done():
+            timer_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await timer_task
+
+
+class FailingTimerActor(RoomActor):
+    def __init__(self) -> None:
+        core = core_at_role_reveal()
+        clock = cast(FrozenClock, core.clock)
+        super().__init__(
+            room_id=core.state.room_id,
+            room_code="ROOM01",
+            seed=core.seed,
+            clock=clock,
+            expires_at=clock() + timedelta(hours=1),
+            last_activity_at=clock(),
+            core=core,
+        )
+        self.release = asyncio.Event()
+
+    async def _run_loop(self) -> None:
+        await self.release.wait()
+        raise RuntimeError("ACTOR_FAILURE")
+
+
+@pytest.mark.asyncio
+async def test_actor_failure_terminates_waiting_timer_task() -> None:
+    actor = FailingTimerActor()
+    await actor.start()
+    actor.release.set()
+
+    with pytest.raises(RuntimeError, match="ACTOR_FAILURE"):
+        assert actor._task is not None
+        await actor._task
+
+    assert actor.closed is True
+    assert actor._timer_task is not None
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(actor._timer_task, timeout=0.5)
+    assert actor._timer_task.done()
+
+
+class CancelSignalTimer:
+    def __init__(self) -> None:
+        self.cancel_called = asyncio.Event()
+        self._task = asyncio.create_task(asyncio.Event().wait())
+
+    def cancel(self) -> None:
+        self.cancel_called.set()
+        self._task.cancel()
+
+    def __await__(self) -> object:
+        return self._task.__await__()
+
+    def done(self) -> bool:
+        return self._task.done()
+
+
+@pytest.mark.asyncio
+async def test_stop_preserves_caller_cancellation() -> None:
+    actor = make_actor(core_at_role_reveal())
+    await actor.start()
+    assert actor._timer_task is not None
+    actor._timer_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await actor._timer_task
+    timer = CancelSignalTimer()
+    actor._timer_task = cast(asyncio.Task[None], timer)
+
+    stop_task = asyncio.create_task(actor.stop())
+    try:
+        await timer.cancel_called.wait()
+        stop_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await stop_task
+    finally:
+        if actor._task is not None and not actor._task.done():
+            await actor.stop()

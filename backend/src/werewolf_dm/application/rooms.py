@@ -322,23 +322,50 @@ class RoomActor:
     def touch(self) -> None:
         self.last_activity_at = self.clock()
 
+    def _reject_pending_futures(self, exc: BaseException) -> None:
+        failure = RoomClosedError("ROOM_CLOSED") if isinstance(exc, asyncio.CancelledError) else exc
+        for future in tuple(self._pending_futures):
+            if future.done():
+                continue
+            future.set_exception(failure)
+
+    def _close(self, exc: BaseException) -> None:
+        self.closed = True
+        self.subscribers.clear()
+        self.deadline_changed.set()
+        self._reject_pending_futures(exc)
+        if self._timer_task is not None:
+            self._timer_task.cancel()
+
+    def _on_actor_task_done(self, task: asyncio.Task[None]) -> None:
+        del task
+        self._close(RoomClosedError("ROOM_CLOSED"))
+
     async def start(self) -> None:
         if self._task is None:
-            self._task = asyncio.create_task(self.run())
+            task = asyncio.create_task(self.run())
+            self._task = task
+            task.add_done_callback(self._on_actor_task_done)
         if self._timer_task is None:
             self._timer_task = asyncio.create_task(TimerScheduler(self, self.clock).run())
 
+    async def _cancel_timer_task(self) -> None:
+        timer_task = self._timer_task
+        if timer_task is None:
+            return
+        timer_task.cancel()
+        try:
+            await asyncio.shield(timer_task)
+        except asyncio.CancelledError:
+            current_task = asyncio.current_task()
+            if current_task is not None and current_task.cancelling():
+                raise
+
     async def stop(self) -> None:
         task_was_done = self._task is not None and self._task.done()
-        self.closed = True
-        for future in tuple(self._pending_futures):
-            if not future.done():
-                future.set_exception(RoomClosedError("ROOM_CLOSED"))
+        self._close(RoomClosedError("ROOM_CLOSED"))
         await self.events.put(StopEvent())
-        if self._timer_task is not None:
-            self._timer_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._timer_task
+        await self._cancel_timer_task()
         if self._task is not None:
             if task_was_done:
                 with contextlib.suppress(Exception):
@@ -422,17 +449,11 @@ class RoomActor:
         try:
             await self._run_loop()
         except BaseException as exc:
-            for future in tuple(self._pending_futures):
-                if future.done():
-                    continue
-                if isinstance(exc, asyncio.CancelledError):
-                    future.cancel()
-                else:
-                    future.set_exception(exc)
+            self._close(exc)
+            await self._cancel_timer_task()
             raise
-        finally:
-            self.closed = True
-            self.subscribers.clear()
+        else:
+            self._close(RoomClosedError("ROOM_CLOSED"))
 
     async def _run_loop(self) -> None:
         while True:

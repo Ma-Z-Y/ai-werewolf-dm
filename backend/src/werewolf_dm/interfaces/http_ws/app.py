@@ -1,6 +1,7 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import timedelta
+from typing import cast
 
 from fastapi import FastAPI, Request, WebSocket
 from fastapi.exceptions import RequestValidationError
@@ -42,9 +43,19 @@ def _error_response(exc: Exception, *, status_code: int | None = None) -> JSONRe
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    if app.state.room_registry is None:
+    owns_registry = app.state.room_registry is None
+    if owns_registry:
         app.state.room_registry = build_production_registry()
-    yield
+    try:
+        yield
+    finally:
+        if owns_registry:
+            registry = cast(RoomRegistry, app.state.room_registry)
+            try:
+                for room_code in tuple(registry.rooms):
+                    await registry.remove_room(room_code)
+            finally:
+                app.state.room_registry = None
 
 
 def create_app(
