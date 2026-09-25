@@ -48,3 +48,11 @@ Thumbs.db
 *.zip
 *.7z
 *.rar
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/coverage/
+frontend/.vite/
+frontend/playwright-report/
+frontend/test-results/
