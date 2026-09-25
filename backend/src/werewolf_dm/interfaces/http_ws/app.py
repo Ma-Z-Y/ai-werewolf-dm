@@ -10,6 +10,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from werewolf_dm.application.rooms import RoomRegistry
 from werewolf_dm.domain.visibility import ProjectionAccessError
+from werewolf_dm.interfaces.http_ws.audit import router as audit_router
 from werewolf_dm.interfaces.http_ws.errors import ErrorCode, ErrorResponse, sanitize_error
 from werewolf_dm.interfaces.http_ws.models import HealthResponse
 from werewolf_dm.interfaces.http_ws.rooms import router as rooms_router
@@ -66,6 +67,7 @@ def create_app(
     app.state.room_registry = registry
     app.state.token_ttl = token_ttl
     app.include_router(rooms_router)
+    app.include_router(audit_router)
     app.include_router(ws_router)
 
     async def request_validation_error_handler(
