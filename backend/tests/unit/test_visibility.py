@@ -744,3 +744,12 @@ def test_projections_reject_constructed_actor(core_at_night, forged_seat_id):
         project_seat_view(core_at_night.state, 1, forged)
     with pytest.raises(ProjectionAccessError, match="PLAYER_REPLAY_FORBIDDEN"):
         project_player_replay(core_at_night.state, tuple(core_at_night.events), forged)
+
+
+def test_public_and_seat_views_project_state_public_timeline(core_at_day_vote):
+    assert core_at_day_vote.state.public_timeline
+    public = project_public_view(core_at_day_vote.state)
+    seat = _seat_view(core_at_day_vote.state, 1)
+
+    assert public.public_timeline == list(core_at_day_vote.state.public_timeline)
+    assert seat.public_timeline == list(core_at_day_vote.state.public_timeline)
