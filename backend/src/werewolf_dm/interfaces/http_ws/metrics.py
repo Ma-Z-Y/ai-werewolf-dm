@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections import deque
 from typing import cast
 
@@ -36,7 +37,7 @@ class LatencyRecorder:
         if not values:
             return 0.0
         ordered = sorted(values)
-        index = max(0, int(len(ordered) * 0.95) - 1)
+        index = math.ceil(len(ordered) * 0.95) - 1
         return ordered[index]
 
     def command_latency_ms_p95(self) -> float:
