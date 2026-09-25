@@ -12,6 +12,7 @@ from werewolf_dm.application.rooms import RoomRegistry
 from werewolf_dm.domain.visibility import ProjectionAccessError
 from werewolf_dm.interfaces.http_ws.audit import router as audit_router
 from werewolf_dm.interfaces.http_ws.errors import ErrorCode, ErrorResponse, sanitize_error
+from werewolf_dm.interfaces.http_ws.metrics import LatencyRecorder, metrics_router
 from werewolf_dm.interfaces.http_ws.models import HealthResponse
 from werewolf_dm.interfaces.http_ws.rooms import router as rooms_router
 from werewolf_dm.interfaces.http_ws.runtime import build_production_registry
@@ -62,13 +63,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 def create_app(
     registry: RoomRegistry | None = None,
     token_ttl: timedelta = timedelta(hours=6),
+    latency: LatencyRecorder | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Werewolf DM S2", version="0.2.0", lifespan=lifespan)
+    latency = latency or LatencyRecorder(window=100)
     app.state.room_registry = registry
     app.state.token_ttl = token_ttl
+    app.state.latency_recorder = latency
     app.include_router(rooms_router)
     app.include_router(audit_router)
     app.include_router(ws_router)
+    app.include_router(metrics_router(registry, latency))
 
     async def request_validation_error_handler(
         request: Request,

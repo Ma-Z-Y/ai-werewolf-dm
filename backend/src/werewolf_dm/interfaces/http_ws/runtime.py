@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import secrets
 from datetime import UTC, datetime, timedelta
+from time import perf_counter
 from typing import Literal, Protocol
 from uuid import UUID, uuid4
 
@@ -12,6 +13,7 @@ from starlette.websockets import WebSocketDisconnect
 from werewolf_dm.application.core import Clock
 from werewolf_dm.application.rooms import RoomRegistry, SecretsTokenSource
 from werewolf_dm.domain.model import StrictModel
+from werewolf_dm.interfaces.http_ws.metrics import LatencyRecorder
 
 
 class RealClock:
@@ -48,6 +50,7 @@ class ConnectionSink:
         *,
         clock: Clock,
         queue_size: int = 64,
+        latency: LatencyRecorder | None = None,
     ) -> None:
         self.websocket = websocket
         self.clock = clock
@@ -55,9 +58,12 @@ class ConnectionSink:
         self.actor_type: Literal["seat", "host"] | None = None
         self.seat_id: int | None = None
         self.channels: frozenset[str] = frozenset()
-        self.send_queue: asyncio.Queue[StrictModel] = asyncio.Queue(maxsize=queue_size)
+        self.send_queue: asyncio.Queue[tuple[StrictModel, float]] = asyncio.Queue(
+            maxsize=queue_size
+        )
         self.close_code: int | None = None
         self.last_client_activity_at = clock()
+        self._latency = latency or self._latency_from_websocket(websocket)
         self._consecutive_full_offers = 0
         self._first_full_offer_at: datetime | None = None
         self._writer_task: asyncio.Task[None] | None = None
@@ -92,6 +98,10 @@ class ConnectionSink:
     def record_client_activity(self) -> None:
         self.last_client_activity_at = self.clock()
 
+    @property
+    def queue_depth(self) -> int:
+        return self.send_queue.qsize()
+
     def idle_expired(self, idle_timeout: float) -> bool:
         return self.clock() >= self.last_client_activity_at + timedelta(seconds=idle_timeout)
 
@@ -99,7 +109,7 @@ class ConnectionSink:
         if self.close_code is not None:
             return False
         try:
-            self.send_queue.put_nowait(message)
+            self.send_queue.put_nowait((message, perf_counter()))
         except asyncio.QueueFull:
             now = self.clock()
             if self._first_full_offer_at is None:
@@ -142,10 +152,32 @@ class ConnectionSink:
 
     async def _writer_loop(self) -> None:
         while True:
-            message = await self.send_queue.get()
+            message, enqueued_at = await self.send_queue.get()
             try:
                 await self.websocket.send_json(message.model_dump(mode="json"))
             except (RuntimeError, WebSocketDisconnect):
                 return
+            else:
+                self._observe_delivery(message, enqueued_at)
             finally:
                 self.send_queue.task_done()
+
+    def _observe_delivery(self, message: StrictModel, enqueued_at: float) -> None:
+        if self._latency is None:
+            return
+        elapsed_ms = (perf_counter() - enqueued_at) * 1000.0
+        if getattr(message, "type", None) == "command.ack":
+            self._latency.observe_command_ms(elapsed_ms)
+        elif getattr(message, "type", None) in {
+            "public.view.updated",
+            "seat.view.updated",
+            "host.control.updated",
+        }:
+            self._latency.observe_broadcast_ms(elapsed_ms)
+
+    @staticmethod
+    def _latency_from_websocket(websocket: WebSocketLike) -> LatencyRecorder | None:
+        app = getattr(websocket, "app", None)
+        state = getattr(app, "state", None)
+        recorder = getattr(state, "latency_recorder", None)
+        return recorder if isinstance(recorder, LatencyRecorder) else None
