@@ -4,6 +4,7 @@ import type { LegalAction, SeatView } from "../../protocol/models";
 import type { RoomSocketState } from "../../realtime/RoomSocket";
 
 import { DayDiscussionScreen } from "./DayDiscussionScreen";
+import { GameEndScreen } from "./GameEndScreen";
 import { NightActionScreen } from "./NightActionScreen";
 import { RoleRevealSheet } from "./RoleRevealSheet";
 import { VoteScreen } from "./VoteScreen";
@@ -94,6 +95,7 @@ export function SeatShell({
     (action) =>
       action.action === "SPEAK" || action.action === "PASS_SPEECH",
   );
+  const isGameEnd = seatView.phase === "GAME_END";
   const recentTimeline = seatView.public_timeline.slice(-3);
 
   return (
@@ -160,7 +162,9 @@ export function SeatShell({
           role={seatView.role}
         />
 
-        {confirmAction === null ? (
+        {isGameEnd ? (
+          <GameEndScreen roomCode={roomCode} seatView={seatView} />
+        ) : confirmAction === null ? (
           isNight ? (
             <NightActionScreen
               actions={seatView.legal_actions}
