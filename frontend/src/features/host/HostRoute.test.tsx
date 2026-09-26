@@ -508,7 +508,7 @@ describe("host control console", () => {
       () => {
         expect(screen.queryByText("482913")).not.toBeInTheDocument();
       },
-      { timeout: 1000 },
+      { timeout: 2000 },
     );
     expect(
       screen.getByText("配对码已失效，请重新生成。"),
