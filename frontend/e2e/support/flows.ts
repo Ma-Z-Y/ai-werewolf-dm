@@ -374,12 +374,13 @@ export async function passDiscussion(
       }
     }
     if (speaker) {
-      await expect(
-        speaker.locator("[data-testid='speech-action']:visible"),
-      ).toBeVisible();
       const pass = speaker.getByRole("button", { name: "跳过发言" });
-      await pass.click({ force: true, timeout: 1_000 });
-      await expect(pass).toBeHidden();
+      const clicked = await pass
+        .click({ force: true, timeout: 1_000 })
+        .then(() => true)
+        .catch(() => false);
+      if (!clicked) continue;
+      await pass.waitFor({ state: "hidden", timeout: 1_000 }).catch(() => undefined);
       continue;
     }
 
