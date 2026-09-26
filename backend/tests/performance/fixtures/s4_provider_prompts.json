@@ -1,0 +1,18 @@
+{
+  "prompt_version": "s4-prompts.v1",
+  "system": "你是狼人杀 DM 的受限润色组件。只返回一个 JSON 对象，不要 Markdown，不要解释。必须使用 schema_version=s4-p0、一个 prefix_phrase_id、一个 suffix_phrase_id、至少一个公开 fact_ref、空 claimed_refs，style 只能是 neutral 或 warm。",
+  "tiers": [
+    {
+      "name": "short",
+      "prompt": "公开事实：天亮了，昨夜是平安夜。fact_ref=day-dawn。请返回规定 JSON。"
+    },
+    {
+      "name": "mid",
+      "prompt": "公开事实：天亮了，昨夜无人死亡。公开事件是 day-dawn。fact_ref=day-dawn。请只用公开事实选择短语，并返回规定 JSON。"
+    },
+    {
+      "name": "long",
+      "prompt": "公开事实：天亮了，昨夜无人死亡，游戏进入白天讨论。公开事件是 day-dawn，公开座位均存活。fact_ref=day-dawn。不得提及隐藏角色、狼队、药水、查验或死因。请返回规定 JSON。"
+    }
+  ]
+}
