@@ -15,6 +15,10 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AppRoutes } from "../../app/routes";
+import type {
+  CommandType,
+  SeatView,
+} from "../../protocol/models";
 import {
   readHostSession,
   readSeatSession,
@@ -95,11 +99,11 @@ function publicView(revision = 1, livingSeats = [1, 2, 3, 4, 5, 6]) {
 }
 
 interface SeatViewOptions {
-  legalActions?: string[];
+  legalActions?: CommandType[];
   livingSeats?: number[];
 }
 
-function seatView(revision = 1, options: SeatViewOptions = {}) {
+function seatView(revision = 1, options: SeatViewOptions = {}): SeatView {
   return {
     ...publicView(revision, options.livingSeats),
     schema_version: "seat-view.v1",
@@ -119,6 +123,38 @@ function preJoinSeatView(revision = 0) {
     legalActions: ["JOIN_ROOM"],
     livingSeats: [],
   });
+}
+
+function nightSeatView({
+  action,
+  targetSeatIds = [],
+  role,
+  revision = 12,
+}: {
+  action: CommandType;
+  targetSeatIds?: number[];
+  role: string;
+  revision?: number;
+}): SeatView {
+  const phase =
+    action === "WOLF_NOMINATE_KILL"
+      ? "NIGHT_WOLF"
+      : action === "SEER_INSPECT"
+        ? "NIGHT_SEER"
+        : "NIGHT_WITCH";
+  return {
+    ...seatView(revision, { legalActions: [] }),
+    phase,
+    day: 1,
+    role,
+    legal_actions: [
+      {
+        action,
+        target_seat_ids: targetSeatIds,
+        deadline_at: "2099-01-01T00:01:00.000Z",
+      },
+    ],
+  };
 }
 
 function sessionReady(
@@ -439,6 +475,263 @@ describe("player entry flow", () => {
     expect(commandId(frame)).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
     );
+  });
+
+  it.each([
+    [
+      "WOLF_NOMINATE_KILL",
+      "WEREWOLF",
+      [2, 3],
+      3,
+      { command_type: "WOLF_NOMINATE_KILL", target_seat_id: 3 },
+    ],
+    [
+      "SEER_INSPECT",
+      "SEER",
+      [2, 4],
+      4,
+      { command_type: "SEER_INSPECT", target_seat_id: 4 },
+    ],
+    [
+      "WITCH_USE_ANTIDOTE",
+      "WITCH",
+      [],
+      null,
+      { command_type: "WITCH_USE_ANTIDOTE" },
+    ],
+    [
+      "WITCH_USE_POISON",
+      "WITCH",
+      [3],
+      3,
+      { command_type: "WITCH_USE_POISON", target_seat_id: 3 },
+    ],
+    [
+      "WITCH_SKIP",
+      "WITCH",
+      [],
+      null,
+      { command_type: "WITCH_SKIP" },
+    ],
+  ])(
+    "sends the exact %s command from the player route",
+    async (action, role, targetSeatIds, selectedTarget, payload) => {
+      const user = userEvent.setup();
+      writeSeatSession({
+        schemaVersion: 1,
+        roomCode: "ABCDEF",
+        roomId: "room-1",
+        seatId: 1,
+        token: "seat-token",
+        expiresAt: "2099-01-01T00:00:00.000Z",
+      });
+
+      renderPlayerRoute("/play/ABCDEF");
+      const socket = await openLatestSocket(
+        sessionReady(
+          nightSeatView({
+            action: action as CommandType,
+            role: role as string,
+            targetSeatIds: targetSeatIds as number[],
+          }),
+          12,
+        ),
+      );
+
+      if (selectedTarget !== null) {
+        await user.click(
+          await screen.findByTestId(
+            `night-target-${String(selectedTarget)}`,
+          ),
+        );
+      } else {
+        await user.click(screen.getByText(
+          action === "WITCH_USE_ANTIDOTE" ? "使用解药" : "跳过行动",
+        ));
+      }
+      await user.click(screen.getByRole("button", { name: "确认行动" }));
+
+      expect(socket.sentLast()).toMatchObject({
+        type: "command",
+        command: {
+          room_id: "room-1",
+          expected_revision: 12,
+          payload,
+        },
+      });
+    },
+  );
+
+  it("disables duplicate night submissions until the server acknowledges", async () => {
+    const user = userEvent.setup();
+    writeSeatSession({
+      schemaVersion: 1,
+      roomCode: "ABCDEF",
+      roomId: "room-1",
+      seatId: 1,
+      token: "seat-token",
+      expiresAt: "2099-01-01T00:00:00.000Z",
+    });
+
+    renderPlayerRoute("/play/ABCDEF");
+    const socket = await openLatestSocket(
+      sessionReady(
+        nightSeatView({
+          action: "SEER_INSPECT",
+          role: "SEER",
+          targetSeatIds: [2],
+        }),
+        12,
+      ),
+    );
+
+    await user.click(await screen.findByTestId("night-target-2"));
+    const confirm = screen.getByRole("button", { name: "确认行动" });
+    await user.click(confirm);
+    await user.click(confirm);
+
+    expect(commandFrames(socket)).toHaveLength(1);
+    expect(confirm).toBeDisabled();
+
+    await act(async () => {
+      socket.message(commandAck(commandId(commandFrames(socket)[0]), true));
+    });
+
+    expect(confirm).toBeEnabled();
+  });
+
+  it("retries a night action with the latest revision after a conflict", async () => {
+    const user = userEvent.setup();
+    writeSeatSession({
+      schemaVersion: 1,
+      roomCode: "ABCDEF",
+      roomId: "room-1",
+      seatId: 1,
+      token: "seat-token",
+      expiresAt: "2099-01-01T00:00:00.000Z",
+    });
+
+    renderPlayerRoute("/play/ABCDEF");
+    const socket = await openLatestSocket(
+      sessionReady(
+        nightSeatView({
+          action: "SEER_INSPECT",
+          role: "SEER",
+          targetSeatIds: [2],
+        }),
+        12,
+      ),
+    );
+
+    await user.click(await screen.findByTestId("night-target-2"));
+    await user.click(screen.getByRole("button", { name: "确认行动" }));
+    const first = commandFrames(socket)[0];
+
+    await act(async () => {
+      socket.message(
+        seatViewUpdate(
+          nightSeatView({
+            action: "SEER_INSPECT",
+            role: "SEER",
+            targetSeatIds: [2],
+            revision: 13,
+          }),
+          2,
+        ),
+      );
+      socket.message(
+        commandAck(commandId(first), false, "REVISION_CONFLICT"),
+      );
+    });
+
+    expect(commandFrames(socket)).toHaveLength(2);
+    expect(socket.sentLast()).toMatchObject({
+      type: "command",
+      command: {
+        expected_revision: 13,
+        payload: { command_type: "SEER_INSPECT", target_seat_id: 2 },
+      },
+    });
+  });
+
+  it("does not retry a stale night action that the latest view removed", async () => {
+    const user = userEvent.setup();
+    writeSeatSession({
+      schemaVersion: 1,
+      roomCode: "ABCDEF",
+      roomId: "room-1",
+      seatId: 1,
+      token: "seat-token",
+      expiresAt: "2099-01-01T00:00:00.000Z",
+    });
+
+    renderPlayerRoute("/play/ABCDEF");
+    const socket = await openLatestSocket(
+      sessionReady(
+        nightSeatView({
+          action: "SEER_INSPECT",
+          role: "SEER",
+          targetSeatIds: [2],
+        }),
+        12,
+      ),
+    );
+
+    await user.click(await screen.findByTestId("night-target-2"));
+    await user.click(screen.getByRole("button", { name: "确认行动" }));
+    const first = commandFrames(socket)[0];
+    const latestView = {
+      ...nightSeatView({
+        action: "SEER_INSPECT",
+        role: "SEER",
+        targetSeatIds: [],
+        revision: 13,
+      }),
+      phase: "NIGHT_WITCH",
+      legal_actions: [],
+    };
+
+    await act(async () => {
+      socket.message(seatViewUpdate(latestView, 2));
+      socket.message(
+        commandAck(commandId(first), false, "REVISION_CONFLICT"),
+      );
+    });
+
+    expect(commandFrames(socket)).toHaveLength(1);
+    expect(
+      await screen.findByText("行动已失效，请重新选择"),
+    ).toBeVisible();
+  });
+
+  it("does not send a target action before a target is selected", async () => {
+    const user = userEvent.setup();
+    writeSeatSession({
+      schemaVersion: 1,
+      roomCode: "ABCDEF",
+      roomId: "room-1",
+      seatId: 1,
+      token: "seat-token",
+      expiresAt: "2099-01-01T00:00:00.000Z",
+    });
+
+    renderPlayerRoute("/play/ABCDEF");
+    const socket = await openLatestSocket(
+      sessionReady(
+        nightSeatView({
+          action: "SEER_INSPECT",
+          role: "SEER",
+          targetSeatIds: [2],
+        }),
+        12,
+      ),
+    );
+
+    const confirm = await screen.findByRole("button", { name: "确认行动" });
+    expect(confirm).toBeDisabled();
+    await user.click(confirm);
+
+    expect(commandFrames(socket)).toHaveLength(0);
   });
 
   it.each([

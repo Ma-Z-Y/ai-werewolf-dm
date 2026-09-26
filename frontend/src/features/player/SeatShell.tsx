@@ -3,6 +3,7 @@ import { Check, CircleX, Moon, Sun, Wifi, WifiOff } from "lucide-react";
 import type { LegalAction, SeatView } from "../../protocol/models";
 import type { RoomSocketState } from "../../realtime/RoomSocket";
 
+import { NightActionScreen } from "./NightActionScreen";
 import { RoleRevealSheet } from "./RoleRevealSheet";
 
 export interface SeatShellProps {
@@ -14,7 +15,7 @@ export interface SeatShellProps {
   actionPending: boolean;
   actionConfirmed: boolean;
   errorMessage: string | null;
-  onAction: (action: LegalAction) => void;
+  onAction: (action: LegalAction, targetSeatId?: number | null) => void;
 }
 
 const CONNECTION_LABELS: Record<RoomSocketState, string> = {
@@ -78,7 +79,7 @@ export function SeatShell({
   );
   const isLiving =
     hasJoinAction || seatView.living_seats.includes(seatId);
-  const action =
+  const confirmAction =
     seatView.legal_actions.find(
       (legalAction) => legalAction.action === "CONFIRM_ROLE",
     ) ?? null;
@@ -148,14 +149,24 @@ export function SeatShell({
           role={seatView.role}
         />
 
-        {action === null ? (
-          <p className="text-sm text-text-muted">等待下一步行动</p>
+        {confirmAction === null ? (
+          isNight ? (
+            <NightActionScreen
+              actions={seatView.legal_actions}
+              disabled={actionPending}
+              key={`${seatView.revision}:${seatView.phase}`}
+              onAction={onAction}
+              role={seatView.role}
+            />
+          ) : (
+            <p className="text-sm text-text-muted">等待下一步行动</p>
+          )
         ) : (
           <button
             className="min-h-11 rounded-lg bg-action px-4 font-semibold text-surface disabled:cursor-not-allowed disabled:opacity-60"
             disabled={actionPending || actionConfirmed}
             type="button"
-            onClick={() => onAction(action)}
+            onClick={() => onAction(confirmAction)}
           >
             {actionPending
               ? "处理中"
