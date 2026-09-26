@@ -1,0 +1,94 @@
+{
+  "schema_version": "s4-provider-budget.v1",
+  "decided_at": "2026-09-26",
+  "decision": "template-only",
+  "provider": "none",
+  "model": "none",
+  "llm_enabled": false,
+  "llm_cancel_ms": 1500,
+  "fallback_deadline_ms": 1600,
+  "absolute_admission_ms": 2000,
+  "runtime_hit_rate_min": 0.5,
+  "runtime_hit_rate_scope": "future-provider-reentry",
+  "spike_source": "backend/tests/performance/fixtures/s4_provider_spike_report.json",
+  "spike_decision": {
+    "selected_provider": "none",
+    "candidate_count": 2,
+    "passing_candidates": 0
+  },
+  "spike_environment": {
+    "hardware": "Windows 11 | AMD64 Family 25 Model 97 Stepping 2, AuthenticAMD | cores=32",
+    "network": "internet",
+    "prompt_version": "s4-prompts.v1",
+    "candidate_samples": {
+      "total": 200,
+      "cold": 100,
+      "warm": 100
+    },
+    "failure_samples": [
+      {
+        "provider": "deepseek-flash",
+        "phase": "warm",
+        "tier": "short",
+        "prompt_id": "warm-1",
+        "latency_ms": 0.2982,
+        "error": "RemoteDisconnected"
+      },
+      {
+        "provider": "deepseek-v4-pro",
+        "phase": "warm",
+        "tier": "short",
+        "prompt_id": "warm-1",
+        "latency_ms": 0.2772,
+        "error": "RemoteDisconnected"
+      }
+    ]
+  },
+  "decision_basis": {
+    "thresholds": {
+      "p99_ms_lt": 1200,
+      "maximum_ms_lt": 1500,
+      "provider_failure_rate_lt": 0.05,
+      "spike_acceptance_rate_gte": 0.5
+    },
+    "observed": [
+      {
+        "provider": "deepseek-flash",
+        "p99_ms": 1634.7157,
+        "maximum_ms": 1842.494,
+        "provider_failure_rate": 0.005,
+        "spike_acceptance_rate": 0.205
+      },
+      {
+        "provider": "deepseek-v4-pro",
+        "p99_ms": 2816.945,
+        "maximum_ms": 3526.4616,
+        "provider_failure_rate": 0.005,
+        "spike_acceptance_rate": 0.0
+      }
+    ],
+    "reason": "Both candidates failed the frozen p99, maximum, and spike acceptance gates."
+  },
+  "d3_input": {
+    "provider_boundary": "disabled-for-s4",
+    "endpoint": null,
+    "model": null,
+    "region": null,
+    "transport": null,
+    "provider_jobs": "not-created"
+  },
+  "d4_input": {
+    "default_source": "template",
+    "fallback_path": "template",
+    "player_visible_retry": false,
+    "failure_policy": "template-only",
+    "degradation_status": "baseline"
+  },
+  "downstream_impact": {
+    "s4_implementation_plan": "requires-rebaseline",
+    "s4_04_provider_adapter": "removed-from-s4",
+    "s4_09_real_provider_evidence": "removed-from-s4",
+    "next_task": "S4-P0-01c",
+    "next_task_goal": "Rebaseline the S4 plan to template-only before executing implementation tasks."
+  }
+}
