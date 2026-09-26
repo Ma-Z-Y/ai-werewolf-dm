@@ -14,7 +14,10 @@
 - S1 Headless 规则核心：已完成并通过独立验收。
 - S2 单进程 FastAPI/WebSocket 实时接口层：S2-01 至 S2-13 已完成、合并并
   通过最终跨层验收修复。
-- S3 前端与 S4 AI DM：尚未开始。
+- S3 React 前端：S3-P0-01 至 S3-13 已完成本地实现、确定性验证和独立
+  复核；CI 与根交付门禁已覆盖前端 lint、类型检查、单元测试、构建和
+  Playwright 六人浏览器闭环。
+- S4 AI DM：尚未开始。
 
 准确状态和下一步以
 [`docs/specs/README.md`](docs/specs/README.md) 与
@@ -49,6 +52,19 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m mypy src
 ```
 
+前端要求 Node 24 与 pnpm 11.19.0：
+
+```powershell
+cd frontend
+pnpm install --frozen-lockfile
+pnpm lint
+pnpm typecheck
+pnpm test
+pnpm build
+pnpm exec playwright install chromium
+pnpm e2e
+```
+
 启动本地 API：
 
 ```powershell
@@ -74,6 +90,7 @@ backend/                       Python 3.12 后端与测试
 docs/specs/                    产品宪法、规则、系统设计与验证矩阵
 docs/ARCHITECTURE.md           面向贡献者的架构入口
 docs/ROADMAP.md                分阶段路线图
+frontend/                      React 19 SPA、Vitest 与 Playwright E2E
 ```
 
 更完整的领域设计从
