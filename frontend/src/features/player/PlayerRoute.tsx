@@ -2,7 +2,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation, useParams } from "react-router-dom";
 
 import { toAppError } from "../../protocol/errors";
-import type { CommandPayload, SeatView } from "../../protocol/models";
+import type {
+  CommandPayload,
+  LegalAction,
+  SeatView,
+} from "../../protocol/models";
 import type {
   RoomSocket,
   RoomSocketEvent,
@@ -16,6 +20,7 @@ import {
 
 import { JoinRoomScreen } from "./JoinRoomScreen";
 import { PlayerLobbyScreen } from "./PlayerLobbyScreen";
+import { SeatShell } from "./SeatShell";
 
 const SEAT_SESSION_KEY_PREFIX = "werewolf:v1:room";
 const SEAT_DISPLAY_NAME_SUFFIX = "seat-name";
@@ -109,6 +114,8 @@ export function PlayerRoute() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [joinPending, setJoinPending] = useState(false);
   const [ready, setReady] = useState(false);
+  const [confirmPending, setConfirmPending] = useState(false);
+  const [roleConfirmed, setRoleConfirmed] = useState(false);
   const [displayName, setDisplayName] = useState(() =>
     readStoredDisplayName(roomCode),
   );
@@ -125,6 +132,7 @@ export function PlayerRoute() {
     previousReady: boolean;
     nextReady: boolean;
   } | null>(null);
+  const confirmCommandRef = useRef<string | null>(null);
 
   const sendCommand = useCallback(
     (
@@ -159,8 +167,11 @@ export function PlayerRoute() {
     joinIntentRef.current = null;
     joinCommandIdRef.current = null;
     readyCommandRef.current = null;
+    confirmCommandRef.current = null;
     setJoinPending(false);
     setReady(false);
+    setConfirmPending(false);
+    setRoleConfirmed(false);
     setSeatView(null);
     seatViewRef.current = null;
     setErrorMessage("会话已过期，请重新加入");
@@ -175,6 +186,8 @@ export function PlayerRoute() {
           expireSession(session);
         } else if (event.closeCode !== null) {
           joinCommandIdRef.current = null;
+          confirmCommandRef.current = null;
+          setConfirmPending(false);
         }
         return;
       }
@@ -264,6 +277,12 @@ export function PlayerRoute() {
             readyCommandRef.current = null;
             setErrorMessage(null);
           }
+          if (message.command_id === confirmCommandRef.current) {
+            confirmCommandRef.current = null;
+            setConfirmPending(false);
+            setRoleConfirmed(true);
+            setErrorMessage(null);
+          }
           return;
         }
 
@@ -303,6 +322,10 @@ export function PlayerRoute() {
           setReady(readyCommand.previousReady);
           readyCommandRef.current = null;
         }
+        if (message.command_id === confirmCommandRef.current) {
+          confirmCommandRef.current = null;
+          setConfirmPending(false);
+        }
         setErrorMessage(toAppError({ code: message.error_code }, 0).message);
         return;
       }
@@ -338,6 +361,7 @@ export function PlayerRoute() {
       joinIntentRef.current = null;
       joinCommandIdRef.current = null;
       readyCommandRef.current = null;
+      confirmCommandRef.current = null;
     };
   }, []);
 
@@ -357,6 +381,8 @@ export function PlayerRoute() {
     setSeatView(null);
     seatViewRef.current = null;
     setReady(false);
+    setConfirmPending(false);
+    setRoleConfirmed(false);
     setErrorMessage(null);
   }
 
@@ -379,12 +405,53 @@ export function PlayerRoute() {
     };
   }
 
+  function handleSeatAction(action: LegalAction) {
+    if (
+      action.action !== "CONFIRM_ROLE" ||
+      session === null ||
+      seatView === null ||
+      confirmPending ||
+      roleConfirmed ||
+      confirmCommandRef.current !== null
+    ) {
+      return;
+    }
+    const id = sendCommand(
+      { command_type: "CONFIRM_ROLE" },
+      seatView.revision,
+      session,
+    );
+    if (id === null) {
+      setErrorMessage("连接尚未就绪，请重试");
+      return;
+    }
+    confirmCommandRef.current = id;
+    setConfirmPending(true);
+    setErrorMessage(null);
+  }
+
   if (session === null) {
     return (
       <JoinRoomScreen
         expiredSession={playerRoute}
         initialRoomCode={roomCode}
         onJoined={handleJoined}
+      />
+    );
+  }
+
+  if (seatView !== null && seatView.phase !== "LOBBY") {
+    return (
+      <SeatShell
+        actionConfirmed={roleConfirmed}
+        actionPending={confirmPending}
+        connectionState={connectionState}
+        errorMessage={errorMessage}
+        onAction={handleSeatAction}
+        ready={ready}
+        roomCode={session.roomCode}
+        seatId={session.seatId}
+        seatView={seatView}
       />
     );
   }
