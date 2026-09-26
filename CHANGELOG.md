@@ -40,5 +40,7 @@
   traceback；客户端只接收安全错误码和 `request_id`。
 - token 原文、片段、摘要和隐藏角色/事实不会进入错误响应。
 - 跨座位频道订阅和跨租户 actor 覆盖均被拒绝。
+- 前端传递依赖 `ansi-regex` 通过 pnpm override 固定到已修复的 `5.0.1`，
+  消除 Dependabot 的安全更新失败。
 - 房间删除或过期会主动关闭已认证连接；malformed ping 和未知协议消息不会
   刷新空闲时间或绕过连接洪泛控制。
