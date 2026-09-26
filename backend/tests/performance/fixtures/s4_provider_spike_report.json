@@ -1,0 +1,114 @@
+{
+  "selected_provider": "none",
+  "report_version": "s4-spike.v1",
+  "candidates": [
+    {
+      "provider": "deepseek-flash",
+      "model": "deepseek-flash",
+      "hardware": "Windows 11 | AMD64 Family 25 Model 97 Stepping 2, AuthenticAMD | cores=32",
+      "network": "internet",
+      "prompt_version": "s4-prompts.v1",
+      "total": {
+        "count": 200,
+        "p99_ms": 1634.7157,
+        "maximum_ms": 1842.494
+      },
+      "cold": {
+        "count": 100,
+        "p99_ms": 1524.1983,
+        "maximum_ms": 1656.5586
+      },
+      "warm": {
+        "count": 100,
+        "p99_ms": 1634.7157,
+        "maximum_ms": 1842.494
+      },
+      "provider_failure_rate": 0.005,
+      "spike_acceptance_rate": 0.205,
+      "tiers": [
+        {
+          "name": "long",
+          "count": 66,
+          "p99_ms": 1499.6298,
+          "maximum_ms": 1499.6298
+        },
+        {
+          "name": "mid",
+          "count": 66,
+          "p99_ms": 1656.5586,
+          "maximum_ms": 1656.5586
+        },
+        {
+          "name": "short",
+          "count": 68,
+          "p99_ms": 1842.494,
+          "maximum_ms": 1842.494
+        }
+      ],
+      "failures": [
+        {
+          "phase": "warm",
+          "tier": "short",
+          "prompt_id": "warm-1",
+          "latency_ms": 0.2982,
+          "error": "RemoteDisconnected"
+        }
+      ],
+      "meets_thresholds": false
+    },
+    {
+      "provider": "deepseek-v4-pro",
+      "model": "deepseek-v4-pro",
+      "hardware": "Windows 11 | AMD64 Family 25 Model 97 Stepping 2, AuthenticAMD | cores=32",
+      "network": "internet",
+      "prompt_version": "s4-prompts.v1",
+      "total": {
+        "count": 200,
+        "p99_ms": 2816.945,
+        "maximum_ms": 3526.4616
+      },
+      "cold": {
+        "count": 100,
+        "p99_ms": 2816.945,
+        "maximum_ms": 2918.8927
+      },
+      "warm": {
+        "count": 100,
+        "p99_ms": 2797.1094,
+        "maximum_ms": 3526.4616
+      },
+      "provider_failure_rate": 0.005,
+      "spike_acceptance_rate": 0.0,
+      "tiers": [
+        {
+          "name": "long",
+          "count": 66,
+          "p99_ms": 2640.8415,
+          "maximum_ms": 2640.8415
+        },
+        {
+          "name": "mid",
+          "count": 66,
+          "p99_ms": 3526.4616,
+          "maximum_ms": 3526.4616
+        },
+        {
+          "name": "short",
+          "count": 68,
+          "p99_ms": 2761.8956,
+          "maximum_ms": 2761.8956
+        }
+      ],
+      "failures": [
+        {
+          "phase": "warm",
+          "tier": "short",
+          "prompt_id": "warm-1",
+          "latency_ms": 0.2772,
+          "error": "RemoteDisconnected"
+        }
+      ],
+      "meets_thresholds": false
+    }
+  ]
+}
