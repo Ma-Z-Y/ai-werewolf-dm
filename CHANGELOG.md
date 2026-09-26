@@ -30,6 +30,9 @@
   讨论、投票、PK、暂停/恢复、重连、终局和回放。
 - GitHub Actions 前端与浏览器 E2E jobs；根交付门禁现在运行前端
   lint、类型检查、单元测试、构建和 E2E，并检查前端源码状态新鲜度。
+- S3 验收修复：20 秒 WebSocket 心跳、4003 接管终态、per-tab 会话抑制、
+  暂停刷新计时、SET_READY 重试、host 在途副作用隔离、服务端相对配对
+  TTL、回放私密事实二次过滤和前端/TypeScript CodeQL。
 
 ### Security
 

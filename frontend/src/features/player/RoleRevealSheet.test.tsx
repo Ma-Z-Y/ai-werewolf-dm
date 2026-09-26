@@ -85,6 +85,7 @@ function publicView(revision = 1) {
     vote_summary: null,
     deadline_at: "2099-01-01T00:02:00.000Z",
     paused: false,
+    paused_at: null,
   };
 }
 

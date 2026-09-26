@@ -81,6 +81,7 @@ export interface PublicView {
   vote_summary: VoteSummary | null;
   deadline_at: string | null;
   paused: boolean;
+  paused_at: string | null;
 }
 
 export interface SeatView extends PublicView {
@@ -141,6 +142,7 @@ export interface JoinRoomResponse {
 export interface DisplayPairingResponse {
   pairing_code: string;
   expires_at: string;
+  expires_in_seconds: number;
 }
 
 export interface DisplaySessionResponse {

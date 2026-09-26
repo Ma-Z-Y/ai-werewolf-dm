@@ -41,6 +41,7 @@ class JoinRoomResponse(StrictModel):
 class DisplayPairingResponse(StrictModel):
     pairing_code: str = Field(pattern=r"^[0-9]{6}$")
     expires_at: datetime
+    expires_in_seconds: int = Field(ge=0)
 
 
 class DisplaySessionExchangeRequest(StrictModel):

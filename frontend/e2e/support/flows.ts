@@ -84,9 +84,24 @@ export async function captureState(
 }
 
 export async function assertStageHasNoPrivateFacts(page: Page): Promise<void> {
-  for (const secret of ["WEREWOLF", "WITCH_POTIONS", "SEER_CHECK"]) {
+  for (const secret of [
+    "WEREWOLF",
+    "WITCH_POTIONS",
+    "SEER_CHECK",
+    "狼人队友",
+    "今夜狼人袭击",
+    "狼队决定袭击",
+    "解药可用",
+    "毒药可用",
+  ]) {
     await expect(page.locator("body")).not.toContainText(secret);
   }
+  await expect(page.locator("body")).not.toContainText(
+    /预言家查验 \d+ 号为/,
+  );
+  await expect(
+    page.getByRole("button", { name: "按住查看身份" }),
+  ).not.toBeVisible();
 }
 
 export async function createRoom(page: Page): Promise<string> {

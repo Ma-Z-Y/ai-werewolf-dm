@@ -97,10 +97,15 @@ def test_host_creates_and_stage_exchanges_pairing_code(
     clock: MutableClock,
 ) -> None:
     pairing = _create_pairing(app_client, created)
-    assert set(pairing) == {"pairing_code", "expires_at"}
+    assert set(pairing) == {
+        "pairing_code",
+        "expires_at",
+        "expires_in_seconds",
+    }
     assert len(pairing["pairing_code"]) == 6
     assert pairing["pairing_code"].isdigit()
     assert datetime.fromisoformat(pairing["expires_at"]) == clock() + timedelta(minutes=5)
+    assert pairing["expires_in_seconds"] == 300
 
     exchanged = _exchange(app_client, created, pairing["pairing_code"])
     assert exchanged.status_code == 201

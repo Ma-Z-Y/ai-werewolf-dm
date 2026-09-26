@@ -147,6 +147,12 @@ function isVoteSummary(value: unknown): value is VoteSummary {
 }
 
 function isPublicView(value: unknown): value is PublicView {
+  const pausedAtIsConsistent =
+    isObject(value) &&
+    isBoolean(value.paused) &&
+    (value.paused
+      ? isString(value.paused_at)
+      : value.paused_at === null);
   return (
     isObject(value) &&
     (value.schema_version === "public-view.v1" ||
@@ -160,7 +166,7 @@ function isPublicView(value: unknown): value is PublicView {
     value.public_timeline.every(isPublicTimelineItem) &&
     (value.vote_summary === null || isVoteSummary(value.vote_summary)) &&
     isNullableString(value.deadline_at) &&
-    isBoolean(value.paused)
+    pausedAtIsConsistent
   );
 }
 
@@ -215,17 +221,28 @@ function isHostControlView(value: unknown): value is HostControlView {
 }
 
 function isRoomSnapshot(value: unknown): value is RoomSnapshot {
+  if (
+    !isObject(value) ||
+    !isString(value.room_id) ||
+    !isString(value.room_code) ||
+    !isInteger(value.revision) ||
+    !isInteger(value.outbox_seq) ||
+    !isPublicView(value.public_view) ||
+    value.public_view.schema_version !== "public-view.v1" ||
+    value.public_view.room_id !== value.room_id
+  ) {
+    return false;
+  }
+  if (
+    value.seat_view !== null &&
+    (!isSeatView(value.seat_view) || value.seat_view.room_id !== value.room_id)
+  ) {
+    return false;
+  }
   return (
-    isObject(value) &&
-    isString(value.room_id) &&
-    isString(value.room_code) &&
-    isInteger(value.revision) &&
-    isInteger(value.outbox_seq) &&
-    isPublicView(value.public_view) &&
-    value.public_view.schema_version === "public-view.v1" &&
-    (value.seat_view === null || isSeatView(value.seat_view)) &&
-    (value.host_control === null ||
-      isHostControlView(value.host_control))
+    value.host_control === null ||
+    (isHostControlView(value.host_control) &&
+      value.host_control.public_view.room_id === value.room_id)
   );
 }
 
@@ -270,7 +287,8 @@ export function parseServerMessage(value: unknown): ParsedServerMessage {
         isString(value.server_time) &&
         isInteger(value.outbox_seq) &&
         isInteger(value.seat_id) &&
-        isSeatView(value.seat_view)
+        isSeatView(value.seat_view) &&
+        value.seat_view.seat_id === value.seat_id
       ) {
         return accepted({
           type: "seat.view.updated",

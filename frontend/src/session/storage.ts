@@ -25,6 +25,8 @@ export interface StoredDisplaySession {
 
 const ROOM_PREFIX = "werewolf:v1:room";
 const LAST_HOST_ROOM_KEY = "werewolf:v1:last-host-room";
+const HOST_REPLACED_SUFFIX = "host-replaced";
+const SEAT_REPLACED_SUFFIX = "seat-replaced";
 
 function normalizeRoomCode(roomCode: string): string {
   return roomCode.trim().toUpperCase();
@@ -32,6 +34,14 @@ function normalizeRoomCode(roomCode: string): string {
 
 function sessionKey(roomCode: string, role: "seat" | "host" | "display") {
   return `${ROOM_PREFIX}:${normalizeRoomCode(roomCode)}:${role}`;
+}
+
+function hostReplacedKey(roomCode: string): string {
+  return `${ROOM_PREFIX}:${normalizeRoomCode(roomCode)}:${HOST_REPLACED_SUFFIX}`;
+}
+
+function seatReplacedKey(roomCode: string): string {
+  return `${ROOM_PREFIX}:${normalizeRoomCode(roomCode)}:${SEAT_REPLACED_SUFFIX}`;
 }
 
 function getStorage(kind: "local" | "session"): Storage | null {
@@ -200,16 +210,51 @@ function writeSession(
 }
 
 export function readSeatSession(roomCode: string): StoredSeatSession | null {
+  const normalizedRoomCode = normalizeRoomCode(roomCode);
+  try {
+    if (
+      getStorage("session")?.getItem(seatReplacedKey(normalizedRoomCode)) ===
+      "1"
+    ) {
+      return null;
+    }
+  } catch {
+    // Session storage can be unavailable; fall through to the durable session.
+  }
   return readSession("local", roomCode, "seat", isSeatSession);
 }
 
 export function writeSeatSession(session: StoredSeatSession): void {
+  safeRemove(getStorage("session"), seatReplacedKey(session.roomCode));
   writeSession("local", session.roomCode, "seat", session);
+}
+
+export function clearSeatSession(roomCode: string): void {
+  const normalizedRoomCode = normalizeRoomCode(roomCode);
+  const storage = getStorage("local");
+  safeRemove(storage, sessionKey(normalizedRoomCode, "seat"));
+  safeRemove(getStorage("session"), seatReplacedKey(normalizedRoomCode));
+}
+
+export function suppressSeatSession(roomCode: string): void {
+  try {
+    getStorage("session")?.setItem(seatReplacedKey(roomCode), "1");
+  } catch {
+    // Per-tab suppression is best effort; the visible takeover state still wins.
+  }
 }
 
 export function readHostSession(roomCode: string): StoredHostSession | null {
   const storage = getStorage("local");
+  const tabStorage = getStorage("session");
   const normalizedRoomCode = normalizeRoomCode(roomCode);
+  try {
+    if (tabStorage?.getItem(hostReplacedKey(normalizedRoomCode)) === "1") {
+      return null;
+    }
+  } catch {
+    // Session storage can be unavailable; fall through to the durable session.
+  }
   removeOtherRoomSessions(storage, normalizedRoomCode, "host");
   const value = readJson(storage, sessionKey(normalizedRoomCode, "host"));
   if (value === null || !isHostSession(value, normalizedRoomCode)) {
@@ -230,10 +275,38 @@ export function writeHostSession(session: StoredHostSession): void {
   const normalizedRoomCode = normalizeRoomCode(session.roomCode);
   writeSession("local", normalizedRoomCode, "host", session);
   const storage = getStorage("local");
+  const tabStorage = getStorage("session");
+  safeRemove(tabStorage, hostReplacedKey(normalizedRoomCode));
   try {
     storage?.setItem(LAST_HOST_ROOM_KEY, normalizedRoomCode);
   } catch {
     // Private browsing and quota failures are not gameplay errors.
+  }
+}
+
+export function clearHostSession(roomCode: string): void {
+  const normalizedRoomCode = normalizeRoomCode(roomCode);
+  const storage = getStorage("local");
+  safeRemove(storage, sessionKey(normalizedRoomCode, "host"));
+  safeRemove(
+    getStorage("session"),
+    hostReplacedKey(normalizedRoomCode),
+  );
+  try {
+    if (storage?.getItem(LAST_HOST_ROOM_KEY) === normalizedRoomCode) {
+      safeRemove(storage, LAST_HOST_ROOM_KEY);
+    }
+  } catch {
+    // Storage can be unavailable or read-only; game logic must continue.
+  }
+}
+
+export function suppressHostSession(roomCode: string): void {
+  const tabStorage = getStorage("session");
+  try {
+    tabStorage?.setItem(hostReplacedKey(roomCode), "1");
+  } catch {
+    // Per-tab suppression is best effort; the visible takeover state still wins.
   }
 }
 

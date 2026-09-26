@@ -282,6 +282,7 @@ export function StageShell({
             <StageTimer
               deadlineAt={publicView.deadline_at}
               paused={publicView.paused}
+              pausedAt={publicView.paused_at}
               phase={phase}
               revision={publicView.revision}
               serverTime={serverTime}

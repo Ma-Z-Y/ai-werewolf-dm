@@ -23,10 +23,13 @@ async def create_display_pairing(
     request: Request,
 ) -> DisplayPairingResponse:
     authorize_bearer(request, room_code, "host")
-    pairing_code, expires_at = registry_from_request(request).create_display_pairing(room_code)
+    pairing_code, expires_at, expires_in_seconds = registry_from_request(
+        request
+    ).create_display_pairing(room_code)
     return DisplayPairingResponse(
         pairing_code=pairing_code,
         expires_at=expires_at,
+        expires_in_seconds=expires_in_seconds,
     )
 
 

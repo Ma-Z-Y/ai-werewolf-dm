@@ -11,6 +11,7 @@ export interface RoomSocketConfig {
   url: string;
   WebSocketCtor?: WebSocketCtor;
   authTimeoutMs?: number;
+  heartbeatIntervalMs?: number;
 }
 
 export type RoomSocketState =
@@ -32,11 +33,13 @@ export type RoomSocketEvent =
 export type RoomSocketListener = (event: RoomSocketEvent) => void;
 
 const DEFAULT_AUTH_TIMEOUT_MS = 5000;
+const DEFAULT_HEARTBEAT_INTERVAL_MS = 20_000;
 
 export class RoomSocket {
   private readonly url: string;
   private readonly WebSocketCtor: WebSocketCtor;
   private readonly authTimeoutMs: number;
+  private readonly heartbeatIntervalMs: number;
   private readonly listeners = new Set<RoomSocketListener>();
   private socket: WebSocket | null = null;
   private token: string | null = null;
@@ -45,6 +48,7 @@ export class RoomSocket {
   private generation = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private authTimer: ReturnType<typeof setTimeout> | null = null;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private shouldReconnect = false;
 
   constructor(config: RoomSocketConfig) {
@@ -56,6 +60,8 @@ export class RoomSocket {
     this.url = config.url;
     this.WebSocketCtor = WebSocketCtor;
     this.authTimeoutMs = config.authTimeoutMs ?? DEFAULT_AUTH_TIMEOUT_MS;
+    this.heartbeatIntervalMs =
+      config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
   }
 
   connect(token: string): void {
@@ -67,6 +73,7 @@ export class RoomSocket {
     this.shouldReconnect = true;
     this.reconnectAttempt = 0;
     this.clearReconnectTimer();
+    this.clearHeartbeatTimer();
     this.closeCurrent(1000, "reconnect");
     this.open();
   }
@@ -89,6 +96,7 @@ export class RoomSocket {
     this.shouldReconnect = false;
     this.clearReconnectTimer();
     this.clearAuthTimer();
+    this.clearHeartbeatTimer();
     this.closeCurrent(code, reason);
     this.setState("closed", code);
   }
@@ -150,6 +158,7 @@ export class RoomSocket {
         this.clearAuthTimer();
         this.reconnectAttempt = 0;
         this.setState("ready", null);
+        this.startHeartbeat();
       }
       this.emit({ kind: "message", message: parsed.message });
     };
@@ -160,6 +169,7 @@ export class RoomSocket {
       }
       this.socket = null;
       this.clearAuthTimer();
+      this.clearHeartbeatTimer();
       this.handleClose(event.code);
     };
   }
@@ -210,6 +220,21 @@ export class RoomSocket {
     if (this.authTimer !== null) {
       clearTimeout(this.authTimer);
       this.authTimer = null;
+    }
+  }
+
+  private startHeartbeat(): void {
+    this.clearHeartbeatTimer();
+    this.heartbeatTimer = setInterval(() => {
+      if (this.state !== "ready") return;
+      this.send({ type: "ping" });
+    }, this.heartbeatIntervalMs);
+  }
+
+  private clearHeartbeatTimer(): void {
+    if (this.heartbeatTimer !== null) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
     }
   }
 

@@ -42,6 +42,7 @@ class PublicView(StrictModel):
     vote_summary: PublicVoteProgress | None
     deadline_at: datetime | None
     paused: bool = False
+    paused_at: datetime | None = None
 
 
 class LegalAction(StrictModel):
@@ -314,6 +315,7 @@ def project_public_view(state: GameState) -> PublicView:
         vote_summary=_active_vote_summary(state),
         deadline_at=state.deadline_at,
         paused=state.paused,
+        paused_at=state.paused_at,
     )
 
 
@@ -352,6 +354,7 @@ def project_seat_view(
         vote_summary=_active_vote_summary(state),
         deadline_at=state.deadline_at,
         paused=state.paused,
+        paused_at=state.paused_at,
         seat_id=seat_id,
         role=player.role if player is not None else None,
         private_facts=tuple(

@@ -27,6 +27,6 @@
 
 每项任务只有在实现、确定性测试、独立复核和用户验收都完成后才会标记为
 完成。正式版本只会在对应阶段的验收出口通过后发布。当前 S2 本地与 CI
-基线为 `486 passed, 6 skipped`，latency marker 为
-`4 passed, 2 skipped`；前端单元/组件测试为 `155 passed`，Playwright
+基线为 `487 passed, 6 skipped`，latency marker 为
+`4 passed, 2 skipped`；前端单元/组件测试为 `166 passed`，Playwright
 浏览器测试为 `3 passed`。CI 与根交付门禁同时覆盖后端和前端。

@@ -1,6 +1,7 @@
 import {
   act,
   cleanup,
+  fireEvent,
   render,
   screen,
   waitFor,
@@ -10,6 +11,7 @@ import {
   MemoryRouter,
   Route,
   Routes,
+  useLocation,
   useNavigate,
 } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -95,6 +97,7 @@ function publicView(revision = 1, livingSeats = [1, 2, 3, 4, 5, 6]) {
     vote_summary: null,
     deadline_at: null,
     paused: false,
+    paused_at: null,
   };
 }
 
@@ -215,6 +218,11 @@ function NavigationProbe() {
   );
 }
 
+function LocationProbe() {
+  const location = useLocation();
+  return <output data-testid="location">{location.pathname}</output>;
+}
+
 function renderHome() {
   return render(
     <MemoryRouter initialEntries={["/"]}>
@@ -230,6 +238,7 @@ function renderPlayerRoute(path: string) {
         <Route path="/join/:roomCode?" element={<PlayerRoute />} />
         <Route path="/play/:roomCode" element={<PlayerRoute />} />
       </Routes>
+      <LocationProbe />
     </MemoryRouter>,
   );
 }
@@ -358,6 +367,29 @@ describe("player entry flow", () => {
     expect(await screen.findByText("等待其他玩家")).toBeVisible();
   });
 
+  it("navigates to the player route after joining without a room code", async () => {
+    const user = userEvent.setup();
+    fetchMock.mockResolvedValue(
+      jsonResponse(201, {
+        room_id: "room-1",
+        seat_id: 1,
+        seat_token: "seat-token",
+        expires_at: "2099-01-01T00:00:00.000Z",
+      }),
+    );
+
+    renderPlayerRoute("/join");
+    await user.type(screen.getByLabelText("房间码"), "ABCDEF");
+    await user.type(screen.getByLabelText("名字"), "3号");
+    await user.click(screen.getByRole("button", { name: "加入房间" }));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("location")).toHaveTextContent(
+        "/play/ABCDEF",
+      ),
+    );
+  });
+
   it("retries JOIN_ROOM until the server acknowledges it", async () => {
     const user = userEvent.setup();
     fetchMock.mockResolvedValue(
@@ -478,6 +510,155 @@ describe("player entry flow", () => {
         },
       },
     });
+  });
+
+  it("deduplicates SET_READY and retries it with the latest revision", async () => {
+    const user = userEvent.setup();
+    writeSeatSession({
+      schemaVersion: 1,
+      roomCode: "ABCDEF",
+      roomId: "room-1",
+      seatId: 1,
+      token: "seat-token",
+      expiresAt: "2099-01-01T00:00:00.000Z",
+    });
+
+    renderPlayerRoute("/play/ABCDEF");
+    const socket = await openLatestSocket(sessionReady(seatView(3), 3));
+    const readyButton = await screen.findByRole("button", { name: "准备" });
+
+    await user.click(readyButton);
+    await user.click(readyButton);
+
+    expect(commandFrames(socket)).toHaveLength(1);
+    expect(readyButton).toBeDisabled();
+    const first = commandFrames(socket)[0];
+
+    await act(async () => {
+      socket.message(seatViewUpdate(seatView(4), 2));
+      socket.message(
+        commandAck(commandId(first), false, "REVISION_CONFLICT"),
+      );
+    });
+
+    expect(commandFrames(socket)).toHaveLength(2);
+    expect(socket.sentLast()).toMatchObject({
+      type: "command",
+      command: {
+        expected_revision: 4,
+        payload: {
+          command_type: "SET_READY",
+          ready: true,
+        },
+      },
+    });
+  });
+
+  it("clears a pending SET_READY when the socket reconnects", async () => {
+    const user = userEvent.setup();
+    writeSeatSession({
+      schemaVersion: 1,
+      roomCode: "ABCDEF",
+      roomId: "room-1",
+      seatId: 1,
+      token: "seat-token",
+      expiresAt: "2099-01-01T00:00:00.000Z",
+    });
+
+    renderPlayerRoute("/play/ABCDEF");
+    const firstSocket = await openLatestSocket(sessionReady(seatView(3), 3));
+    await user.click(await screen.findByRole("button", { name: "准备" }));
+    expect(commandFrames(firstSocket)).toHaveLength(1);
+
+    await act(async () => {
+      firstSocket.close(1001, "server restart");
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    const secondSocket = FakeWebSocket.instances[1];
+    expect(secondSocket).toBeDefined();
+    await act(async () => {
+      secondSocket.open();
+      secondSocket.message(sessionReady(seatView(3), 3));
+    });
+    await user.click(screen.getByRole("button", { name: "准备" }));
+
+    expect(commandFrames(secondSocket)).toHaveLength(1);
+  });
+
+  it("clears private player state when another device takes over", async () => {
+    writeSeatSession({
+      schemaVersion: 1,
+      roomCode: "ABCDEF",
+      roomId: "room-1",
+      seatId: 1,
+      token: "seat-token",
+      expiresAt: "2099-01-01T00:00:00.000Z",
+    });
+
+    renderPlayerRoute("/play/ABCDEF");
+    const socket = await openLatestSocket(
+      sessionReady(
+        nightSeatView({
+          action: "WOLF_NOMINATE_KILL",
+          role: "WEREWOLF",
+          targetSeatIds: [2],
+        }),
+        12,
+      ),
+    );
+
+    fireEvent.pointerDown(
+      await screen.findByRole("button", { name: "按住查看身份" }),
+    );
+    expect(screen.getByText("狼人")).toBeVisible();
+
+    await act(async () => {
+      socket.close(4003, "replaced");
+    });
+
+    expect(screen.getByText(/已在其他设备接管/)).toBeVisible();
+    expect(screen.queryByText("狼人")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "按住查看身份" }),
+    ).not.toBeInTheDocument();
+    expect(
+      globalThis.localStorage.getItem(
+        "werewolf:v1:room:ABCDEF:seat",
+      ),
+    ).not.toBeNull();
+    expect(readSeatSession("ABCDEF")).toBeNull();
+    globalThis.sessionStorage.clear();
+    expect(readSeatSession("ABCDEF")?.token).toBe("seat-token");
+  });
+
+  it("rejects a session snapshot for a different seat", async () => {
+    writeSeatSession({
+      schemaVersion: 1,
+      roomCode: "ABCDEF",
+      roomId: "room-1",
+      seatId: 1,
+      token: "seat-token",
+      expiresAt: "2099-01-01T00:00:00.000Z",
+    });
+
+    renderPlayerRoute("/play/ABCDEF");
+    await openLatestSocket(
+      sessionReady(
+        {
+          ...nightSeatView({
+            action: "WOLF_NOMINATE_KILL",
+            role: "WEREWOLF",
+            targetSeatIds: [2],
+          }),
+          seat_id: 2,
+        },
+        12,
+      ),
+    );
+
+    expect(screen.getByText("会话数据不一致，请重新加入")).toBeVisible();
+    expect(screen.queryByText("狼人")).not.toBeInTheDocument();
   });
 
   it("generates command ids without secure-context randomUUID", async () => {

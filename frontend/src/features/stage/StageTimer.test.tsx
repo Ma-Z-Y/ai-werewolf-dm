@@ -24,6 +24,7 @@ function publicView(overrides: Partial<PublicView> = {}): PublicView {
     vote_summary: null,
     deadline_at: "2026-09-25T00:00:30.000Z",
     paused: false,
+    paused_at: null,
     ...overrides,
   };
 }
@@ -257,6 +258,25 @@ describe("stage timer", () => {
     });
 
     expect(screen.getByText("计时 00:25")).toBeVisible();
+  });
+
+  it("restores the frozen remaining time after a paused reload", () => {
+    const pausedProps = {
+      pausedAt: "2026-09-25T00:00:00.000Z",
+    } as { pausedAt: string };
+
+    render(
+      <StageTimer
+        {...pausedProps}
+        deadlineAt="2026-09-25T00:00:30.000Z"
+        paused
+        phase="DAY_DISCUSSION"
+        revision={5}
+        serverTime="2026-09-25T00:00:20.000Z"
+      />,
+    );
+
+    expect(screen.getByText("计时 00:30")).toBeVisible();
   });
 });
 

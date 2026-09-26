@@ -10,6 +10,7 @@ export interface PlayerLobbyScreenProps {
   seatView: SeatView | null;
   joinPending: boolean;
   ready: boolean;
+  readyPending: boolean;
   errorMessage: string | null;
   onToggleReady: () => void;
 }
@@ -46,6 +47,7 @@ export function PlayerLobbyScreen({
   seatView,
   joinPending,
   ready,
+  readyPending,
   errorMessage,
   onToggleReady,
 }: PlayerLobbyScreenProps) {
@@ -108,6 +110,7 @@ export function PlayerLobbyScreen({
           {canSetReady ? (
             <button
               className="inline-flex min-h-11 items-center justify-center rounded-lg bg-action px-4 font-semibold text-surface"
+              disabled={readyPending}
               type="button"
               onClick={onToggleReady}
             >

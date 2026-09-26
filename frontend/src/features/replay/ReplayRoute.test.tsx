@@ -57,6 +57,7 @@ function gameEndSeatView(): SeatView {
     vote_summary: null,
     deadline_at: null,
     paused: false,
+    paused_at: null,
     seat_id: 1,
     role: "SEER",
     private_facts: [
@@ -112,6 +113,18 @@ describe("ReplayRoute", () => {
           faction: "GOOD",
         },
       },
+      {
+        fact_id: "fact-other-seat",
+        event_id: "event-other-seat",
+        recipient_seat_id: 2,
+        revision: 9,
+        fact_type: "SEER_CHECK",
+        payload: {
+          day: 1,
+          target_seat_id: 3,
+          faction: "WEREWOLF",
+        },
+      },
     ];
     fetchMock.mockResolvedValue(
       jsonResponse(200, {
@@ -141,6 +154,9 @@ describe("ReplayRoute", () => {
       await screen.findByText("预言家查验 2 号为好人"),
     ).toBeVisible();
     expect(screen.getByText("2 号玩家出局")).toBeVisible();
+    expect(
+      screen.queryByText("预言家查验 3 号为狼人"),
+    ).not.toBeInTheDocument();
     expect(screen.queryByText("DM_TRACE")).not.toBeInTheDocument();
     expect(
       screen.queryByText("RAW_SNAPSHOT_SENTINEL"),

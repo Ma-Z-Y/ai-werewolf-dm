@@ -5,26 +5,19 @@ import { AppError } from "../../protocol/errors";
 import type { PlayerReplay } from "../../protocol/models";
 import { getPlayerReplay } from "../../session/roomSession";
 import {
+  clearSeatSession,
   readSeatSession,
   type StoredSeatSession,
 } from "../../session/storage";
 
 import { ReplayTimeline } from "./ReplayTimeline";
 
-const SEAT_SESSION_KEY_PREFIX = "werewolf:v1:room";
-
 function normalizeRoomCode(value: string | undefined): string {
   return value?.trim().toUpperCase() ?? "";
 }
 
 function clearStoredSeatSession(roomCode: string): void {
-  try {
-    globalThis.localStorage.removeItem(
-      `${SEAT_SESSION_KEY_PREFIX}:${roomCode}:seat`,
-    );
-  } catch {
-    // Storage can be unavailable or read-only; the replay route still exits.
-  }
+  clearSeatSession(roomCode);
 }
 
 function replayErrorMessage(error: unknown): string {
@@ -65,6 +58,10 @@ export function ReplayRoute() {
       : result?.key === requestKey
         ? result.error
         : null;
+  const ownPrivateFacts =
+    replay?.private_facts.filter(
+      (fact) => fact.recipient_seat_id === session?.seatId,
+    ) ?? [];
 
   useEffect(() => {
     if (session === null || requestKey === null) return;
@@ -154,7 +151,7 @@ export function ReplayRoute() {
 
         {error === null ? (
           <ReplayTimeline
-            privateFacts={replay?.private_facts ?? []}
+            privateFacts={ownPrivateFacts}
             publicTimeline={replay?.public_timeline ?? []}
           />
         ) : (

@@ -10,6 +10,7 @@ export interface TimerAnchorSource {
   phase?: string;
   revision?: number;
   paused?: boolean;
+  pausedAt?: string | null;
 }
 
 export interface TimerAnchor {
@@ -20,6 +21,7 @@ export interface TimerAnchor {
   phase?: string;
   revision?: number;
   paused: boolean;
+  pausedAt?: string | null;
   serverTime: string;
   remainingAt: (elapsedMs: number) => number;
 }
@@ -31,11 +33,11 @@ function parseTimestamp(value: string | null): number | null {
 }
 
 function remainingFromServer(
-  deadlineAt: string | null,
-  serverTime: string,
+  source: Pick<TimerAnchorSource, "deadlineAt" | "paused" | "pausedAt" | "serverTime">,
 ): number {
-  const deadlineMs = parseTimestamp(deadlineAt);
-  const serverMs = parseTimestamp(serverTime);
+  const deadlineMs = parseTimestamp(source.deadlineAt);
+  const basis = source.paused ? source.pausedAt : source.serverTime;
+  const serverMs = parseTimestamp(basis ?? null);
   if (deadlineMs === null || serverMs === null) return 0;
   return Math.max(0, deadlineMs - serverMs);
 }
@@ -53,6 +55,7 @@ function anchorFromRemaining(
     phase: source.phase,
     revision: source.revision,
     paused: source.paused ?? false,
+    pausedAt: source.pausedAt,
     serverTime: source.serverTime,
     remainingAt(elapsedMs: number): number {
       return Math.max(0, remainingMs - Math.max(0, elapsedMs));
@@ -66,7 +69,7 @@ export function createTimerAnchor(
 ): TimerAnchor {
   return anchorFromRemaining(
     source,
-    remainingFromServer(source.deadlineAt, source.serverTime),
+    remainingFromServer(source),
     now,
   );
 }
@@ -91,6 +94,12 @@ export function shouldReanchor(
     return true;
   }
   if (source.paused !== undefined && source.paused !== anchor.paused) return true;
+  if (
+    source.pausedAt !== undefined &&
+    source.pausedAt !== anchor.pausedAt
+  ) {
+    return true;
+  }
 
   if (source.serverTime === anchor.serverTime) return false;
   const serverMs = parseTimestamp(source.serverTime);
@@ -117,17 +126,18 @@ export interface StageTimerProps extends TimerAnchorSource {
 export function StageTimer({
   deadlineAt,
   paused,
+  pausedAt,
   phase,
   revision,
   serverTime,
 }: StageTimerProps) {
   const anchorRef = useRef<TimerAnchor | null>(null);
   const [remainingMs, setRemainingMs] = useState(() =>
-    remainingFromServer(deadlineAt, serverTime),
+    remainingFromServer({ deadlineAt, paused, pausedAt, serverTime }),
   );
 
   useEffect(() => {
-    const source = { deadlineAt, paused, phase, revision, serverTime };
+    const source = { deadlineAt, paused, pausedAt, phase, revision, serverTime };
     const now = performance.now();
     const currentAnchor = anchorRef.current;
     const deadlineChanged =
@@ -163,7 +173,7 @@ export function StageTimer({
       setRemainingMs(displayRemaining(activeAnchor, tickNow, false));
     }, 250);
     return () => window.clearInterval(timer);
-  }, [deadlineAt, paused, phase, revision, serverTime]);
+  }, [deadlineAt, paused, pausedAt, phase, revision, serverTime]);
 
   return (
     <section aria-labelledby="stage-timer-title" className="grid gap-3">

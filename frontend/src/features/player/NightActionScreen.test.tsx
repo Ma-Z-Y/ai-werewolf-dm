@@ -56,6 +56,7 @@ function nightSeatView(
     vote_summary: null,
     deadline_at: "2099-01-01T00:01:00.000Z",
     paused: false,
+    paused_at: null,
     seat_id: 1,
     role,
     private_facts: [],

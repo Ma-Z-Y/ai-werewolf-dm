@@ -72,6 +72,7 @@ function publicView() {
     vote_summary: null,
     deadline_at: null,
     paused: false,
+    paused_at: null,
   };
 }
 
@@ -186,6 +187,32 @@ describe("parseServerMessage", () => {
         outbox_seq: 3,
         seat_id: 1,
         seat_view: seatView("NOT_A_COMMAND"),
+      }),
+    ).toEqual({ kind: "ignored" });
+  });
+
+  it("ignores a seat update whose nested seat identity does not match", () => {
+    expect(
+      parseServerMessage({
+        type: "seat.view.updated",
+        server_time: "2026-09-25T00:00:00.000Z",
+        outbox_seq: 3,
+        seat_id: 2,
+        seat_view: seatView("SET_READY"),
+      }),
+    ).toEqual({ kind: "ignored" });
+  });
+
+  it("ignores a paused public view without a pause timestamp", () => {
+    expect(
+      parseServerMessage({
+        type: "public.view.updated",
+        server_time: "2026-09-25T00:00:00.000Z",
+        outbox_seq: 3,
+        public_view: {
+          ...publicView(),
+          paused: true,
+        },
       }),
     ).toEqual({ kind: "ignored" });
   });
@@ -323,6 +350,36 @@ describe("RoomSocket", () => {
     socket.disconnect();
 
     expect(ws.closeCalls).toEqual([{ code: 1000, reason: "client disconnect" }]);
+  });
+
+  it("sends a heartbeat ping after session.ready", () => {
+    vi.useFakeTimers();
+    const socket = new RoomSocket({
+      url: "ws://test/ws",
+      WebSocketCtor,
+      heartbeatIntervalMs: 20_000,
+    } as unknown as ConstructorParameters<typeof RoomSocket>[0]);
+    socket.connect("seat-token");
+    const ws = FakeWebSocket.latest;
+    ws.open();
+
+    ws.message({
+      type: "session.ready",
+      server_time: "2026-09-25T00:00:00.000Z",
+      snapshot: {
+        room_id: "room-1",
+        room_code: "ABCDEF",
+        revision: 0,
+        outbox_seq: 0,
+        public_view: publicView(),
+        seat_view: seatView("SET_READY"),
+        host_control: null,
+      },
+    });
+
+    vi.advanceTimersByTime(20_000);
+
+    expect(ws.received()).toContainEqual({ type: "ping" });
   });
 });
 

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useLocation, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 
 import { toAppError } from "../../protocol/errors";
 import type {
@@ -14,7 +14,9 @@ import type {
 } from "../../realtime/RoomSocket";
 import { useRoomSocket } from "../../realtime/useRoomSocket";
 import {
+  clearSeatSession,
   readSeatSession,
+  suppressSeatSession,
   type StoredSeatSession,
 } from "../../session/storage";
 
@@ -69,10 +71,8 @@ function commandId(): string {
 }
 
 function clearStoredSeatSession(roomCode: string): void {
+  clearSeatSession(roomCode);
   try {
-    globalThis.localStorage.removeItem(
-      `${SEAT_SESSION_KEY_PREFIX}:${roomCode}:seat`,
-    );
     globalThis.localStorage.removeItem(
       `${SEAT_SESSION_KEY_PREFIX}:${roomCode}:${SEAT_DISPLAY_NAME_SUFFIX}`,
     );
@@ -108,6 +108,7 @@ function writeStoredDisplayName(roomCode: string, displayName: string): void {
 export function PlayerRoute() {
   const { roomCode: routeCode } = useParams();
   const location = useLocation();
+  const navigate = useNavigate();
   const roomCode = normalizeRoomCode(routeCode);
   const playerRoute = location.pathname.startsWith("/play/");
   const [session, setSession] = useState<StoredSeatSession | null>(() =>
@@ -119,10 +120,12 @@ export function PlayerRoute() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [joinPending, setJoinPending] = useState(false);
   const [ready, setReady] = useState(false);
+  const [readyPending, setReadyPending] = useState(false);
   const [confirmPending, setConfirmPending] = useState(false);
   const [roleConfirmed, setRoleConfirmed] = useState(false);
   const [nightPending, setNightPending] = useState(false);
   const [dayPending, setDayPending] = useState(false);
+  const [takeoverMessage, setTakeoverMessage] = useState<string | null>(null);
   const [displayName, setDisplayName] = useState(() =>
     readStoredDisplayName(roomCode),
   );
@@ -251,12 +254,14 @@ export function PlayerRoute() {
     dayCommandRef.current = null;
     setJoinPending(false);
     setReady(false);
+    setReadyPending(false);
     setConfirmPending(false);
     setRoleConfirmed(false);
     setNightPending(false);
     setDayPending(false);
     setSeatView(null);
     seatViewRef.current = null;
+    setTakeoverMessage(null);
     setErrorMessage("会话已过期，请重新加入");
     setSession(null);
   }, []);
@@ -267,14 +272,38 @@ export function PlayerRoute() {
         setConnectionState(event.state);
         if (event.closeCode === 4001) {
           expireSession(session);
+        } else if (event.closeCode === 4003) {
+          if (session !== null) {
+            suppressSeatSession(session.roomCode);
+          }
+          joinIntentRef.current = null;
+          joinCommandIdRef.current = null;
+          readyCommandRef.current = null;
+          confirmCommandRef.current = null;
+          nightIntentRef.current = null;
+          nightCommandRef.current = null;
+          dayIntentRef.current = null;
+          dayCommandRef.current = null;
+          setJoinPending(false);
+          setReadyPending(false);
+          setConfirmPending(false);
+          setNightPending(false);
+          setDayPending(false);
+          setSeatView(null);
+          seatViewRef.current = null;
+          setTakeoverMessage(
+            "此玩家席已在其他设备接管，请继续使用新设备。",
+          );
         } else if (event.closeCode !== null) {
           joinCommandIdRef.current = null;
+          readyCommandRef.current = null;
           confirmCommandRef.current = null;
           nightIntentRef.current = null;
           nightCommandRef.current = null;
           dayIntentRef.current = null;
           dayCommandRef.current = null;
           setConfirmPending(false);
+          setReadyPending(false);
           setNightPending(false);
           setDayPending(false);
         }
@@ -284,6 +313,16 @@ export function PlayerRoute() {
       const message = event.message;
       if (message.type === "session.ready") {
         setConnectionState("ready");
+        if (
+          session !== null &&
+          (message.snapshot.room_id !== session.roomId ||
+            message.snapshot.seat_view?.seat_id !== session.seatId)
+        ) {
+          setSeatView(null);
+          seatViewRef.current = null;
+          setErrorMessage("会话数据不一致，请重新加入");
+          return;
+        }
         setSeatView(message.snapshot.seat_view);
         seatViewRef.current = message.snapshot.seat_view;
 
@@ -363,6 +402,7 @@ export function PlayerRoute() {
             message.command_id === readyCommand.commandId
           ) {
             setReady(readyCommand.nextReady);
+            setReadyPending(false);
             readyCommandRef.current = null;
             setErrorMessage(null);
           }
@@ -420,8 +460,36 @@ export function PlayerRoute() {
           readyCommand !== null &&
           message.command_id === readyCommand.commandId
         ) {
-          setReady(readyCommand.previousReady);
           readyCommandRef.current = null;
+          setReadyPending(false);
+          const latestView = seatViewRef.current;
+          const canRetryReady =
+            message.error_code === "REVISION_CONFLICT" &&
+            latestView !== null &&
+            session !== null &&
+            latestView.legal_actions.some(
+              (action) => action.action === "SET_READY",
+            );
+          if (canRetryReady && latestView !== null && session !== null) {
+            const id = sendCommand(
+              {
+                command_type: "SET_READY",
+                ready: readyCommand.nextReady,
+              },
+              latestView.revision,
+              session,
+            );
+            if (id !== null) {
+              readyCommandRef.current = {
+                ...readyCommand,
+                commandId: id,
+              };
+              setReadyPending(true);
+              setErrorMessage(null);
+              return;
+            }
+          }
+          setReady(readyCommand.previousReady);
         }
         if (message.command_id === confirmCommandRef.current) {
           confirmCommandRef.current = null;
@@ -572,15 +640,29 @@ export function PlayerRoute() {
     setSeatView(null);
     seatViewRef.current = null;
     setReady(false);
+    setReadyPending(false);
     setConfirmPending(false);
     setRoleConfirmed(false);
     setNightPending(false);
     setDayPending(false);
+    setTakeoverMessage(null);
     setErrorMessage(null);
+    if (!location.pathname.startsWith("/play/")) {
+      navigate(`/play/${encodeURIComponent(joinedSession.roomCode)}`, {
+        replace: true,
+      });
+    }
   }
 
   function handleToggleReady() {
-    if (session === null || seatView === null) return;
+    if (
+      session === null ||
+      seatView === null ||
+      readyPending ||
+      readyCommandRef.current !== null
+    ) {
+      return;
+    }
     const nextReady = !ready;
     const id = sendCommand(
       { command_type: "SET_READY", ready: nextReady },
@@ -596,6 +678,7 @@ export function PlayerRoute() {
       previousReady: ready,
       nextReady,
     };
+    setReadyPending(true);
   }
 
   function handleSeatAction(
@@ -651,6 +734,17 @@ export function PlayerRoute() {
     setErrorMessage(null);
   }
 
+  if (takeoverMessage !== null) {
+    return (
+      <main className="grid min-h-screen place-items-center bg-surface px-6 py-12 text-text">
+        <section className="grid max-w-md gap-4 text-center" role="status">
+          <h1 className="text-3xl font-semibold">玩家席已接管</h1>
+          <p className="text-sm text-text-muted">{takeoverMessage}</p>
+        </section>
+      </main>
+    );
+  }
+
   if (session === null) {
     return (
       <JoinRoomScreen
@@ -684,6 +778,7 @@ export function PlayerRoute() {
       joinPending={joinPending}
       onToggleReady={handleToggleReady}
       ready={ready}
+      readyPending={readyPending}
       roomCode={session.roomCode}
       seatId={session.seatId}
       seatView={seatView}

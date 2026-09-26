@@ -77,6 +77,7 @@ function publicView(overrides: Record<string, unknown> = {}) {
     vote_summary: null,
     deadline_at: null,
     paused: false,
+    paused_at: null,
     ...overrides,
   };
 }
@@ -412,6 +413,7 @@ describe("shared stage", () => {
       publicView({
         deadline_at: "2026-09-26T00:00:30.000Z",
         paused: true,
+        paused_at: "2026-09-26T00:00:00.000Z",
       }),
     );
 
@@ -423,6 +425,7 @@ describe("shared stage", () => {
           publicView({
             deadline_at: "2026-09-26T00:00:30.000Z",
             paused: true,
+            paused_at: "2026-09-26T00:00:00.000Z",
             revision: 5,
           }),
           "2026-09-26T00:05:00.000Z",

@@ -18,7 +18,9 @@ import {
   revokeDisplay,
 } from "../../session/roomSession";
 import {
+  clearHostSession,
   readHostSession,
+  suppressHostSession,
   type StoredHostSession,
 } from "../../session/storage";
 
@@ -33,9 +35,6 @@ interface HostCommandIntent {
   commandId: string;
   payload: HostCommandPayload;
 }
-
-const HOST_SESSION_KEY_PREFIX = "werewolf:v1:room";
-const LAST_HOST_ROOM_KEY = "werewolf:v1:last-host-room";
 
 function normalizeRoomCode(value: string | undefined): string {
   return value?.trim().toUpperCase() ?? "";
@@ -76,16 +75,7 @@ function commandId(): string {
 }
 
 function clearStoredHostSession(roomCode: string): void {
-  try {
-    globalThis.localStorage.removeItem(
-      `${HOST_SESSION_KEY_PREFIX}:${roomCode}:host`,
-    );
-    if (globalThis.localStorage.getItem(LAST_HOST_ROOM_KEY) === roomCode) {
-      globalThis.localStorage.removeItem(LAST_HOST_ROOM_KEY);
-    }
-  } catch {
-    // Storage can be unavailable or read-only; the UI still exits the session.
-  }
+  clearHostSession(roomCode);
 }
 
 function errorMessage(error: unknown): string {
@@ -115,13 +105,16 @@ export function HostRoute() {
   const socketRef = useRef<RoomSocket | null>(null);
   const hostControlRef = useRef<HostControlView | null>(null);
   const hostCommandRef = useRef<HostCommandIntent | null>(null);
+  const sessionGenerationRef = useRef(0);
 
   const endSession = useCallback(
     (
       endedSession: StoredHostSession | null,
       message: string,
+      clearStorage = true,
     ) => {
-      if (endedSession !== null) {
+      sessionGenerationRef.current += 1;
+      if (clearStorage && endedSession !== null) {
         clearStoredHostSession(endedSession.roomCode);
       }
       hostCommandRef.current = null;
@@ -130,6 +123,9 @@ export function HostRoute() {
       setPairingCode(null);
       setPairingExpiresAt(null);
       setPairingExpired(false);
+      setPairingPending(false);
+      setRevokePending(false);
+      setAuditPending(false);
       setHostControl(null);
       hostControlRef.current = null;
       setError(message);
@@ -182,11 +178,15 @@ export function HostRoute() {
       if (event.kind === "state") {
         setConnectionState(event.state);
         if (event.closeCode === 4001) {
-          expireSession(session);
+      expireSession(session);
         } else if (event.closeCode === 4003) {
+          if (session !== null) {
+            suppressHostSession(session.roomCode);
+          }
           endSession(
             session,
             "主持人控制台已在其他设备接管，请继续使用新设备。",
+            false,
           );
         } else if (event.closeCode !== null) {
           hostCommandRef.current = null;
@@ -290,6 +290,7 @@ export function HostRoute() {
 
   useEffect(() => {
     return () => {
+      sessionGenerationRef.current += 1;
       hostCommandRef.current = null;
     };
   }, []);
@@ -351,6 +352,7 @@ export function HostRoute() {
 
   async function handleGeneratePairing() {
     if (session === null || pairingPending) return;
+    const generation = sessionGenerationRef.current;
     setPairingPending(true);
     setPairingExpired(false);
     setError(null);
@@ -359,45 +361,61 @@ export function HostRoute() {
         session.roomCode,
         session.token,
       );
-      const expiresAt = Date.parse(pairing.expires_at);
-      if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+      if (generation !== sessionGenerationRef.current) return;
+      const expiresInSeconds = pairing.expires_in_seconds;
+      if (
+        !Number.isInteger(expiresInSeconds) ||
+        expiresInSeconds <= 0
+      ) {
         setPairingCode(null);
         setPairingExpiresAt(null);
         setPairingExpired(true);
         return;
       }
       setPairingCode(pairing.pairing_code);
-      setPairingExpiresAt(pairing.expires_at);
+      setPairingExpiresAt(
+        new Date(Date.now() + expiresInSeconds * 1000).toISOString(),
+      );
     } catch (caught) {
+      if (generation !== sessionGenerationRef.current) return;
       setError(errorMessage(caught));
     } finally {
-      setPairingPending(false);
+      if (generation === sessionGenerationRef.current) {
+        setPairingPending(false);
+      }
     }
   }
 
   async function handleRevokeDisplay() {
     if (session === null || revokePending) return;
+    const generation = sessionGenerationRef.current;
     setRevokePending(true);
     setError(null);
     try {
       await revokeDisplay(session.roomCode, session.token);
+      if (generation !== sessionGenerationRef.current) return;
       setPairingCode(null);
       setPairingExpiresAt(null);
       setPairingExpired(false);
     } catch (caught) {
+      if (generation !== sessionGenerationRef.current) return;
       setError(errorMessage(caught));
     } finally {
-      setRevokePending(false);
+      if (generation === sessionGenerationRef.current) {
+        setRevokePending(false);
+      }
     }
   }
 
   async function handleDownloadAudit() {
     if (session === null || auditPending) return;
+    const generation = sessionGenerationRef.current;
     setAuditPending(true);
     setError(null);
     let objectUrl: string | null = null;
     try {
       const audit = await getHostAudit(session.roomCode, session.token);
+      if (generation !== sessionGenerationRef.current) return;
       const blob = new Blob([JSON.stringify(audit, null, 2)], {
         type: "application/json",
       });
@@ -407,12 +425,15 @@ export function HostRoute() {
       anchor.download = `host-audit-${session.roomCode}.json`;
       anchor.click();
     } catch (caught) {
+      if (generation !== sessionGenerationRef.current) return;
       setError(errorMessage(caught));
     } finally {
-      if (objectUrl !== null) {
+      if (generation === sessionGenerationRef.current && objectUrl !== null) {
         URL.revokeObjectURL(objectUrl);
       }
-      setAuditPending(false);
+      if (generation === sessionGenerationRef.current) {
+        setAuditPending(false);
+      }
     }
   }
 

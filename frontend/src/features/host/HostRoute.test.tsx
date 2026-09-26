@@ -86,6 +86,7 @@ function publicView(revision: number) {
     vote_summary: null,
     deadline_at: null,
     paused: false,
+    paused_at: null,
   };
 }
 
@@ -94,6 +95,7 @@ function hostControl(paused = false, revision = 7): HostControlView {
     public_view: {
       ...publicView(revision),
       paused,
+      paused_at: paused ? "2026-09-26T00:00:00.000Z" : null,
     },
     paused,
     revision,
@@ -274,6 +276,7 @@ describe("host control console", () => {
         return jsonResponse(201, {
           pairing_code: "482913",
           expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+          expires_in_seconds: 3600,
         });
       }
       if (
@@ -356,6 +359,42 @@ describe("host control console", () => {
     expect(window.location.href).not.toContain("host-token");
   });
 
+  it("does not finish an in-flight audit after another device takes over", async () => {
+    writeHostSessionForRoom();
+    let resolveAudit: ((response: Response) => void) | null = null;
+    fetchMock.mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveAudit = resolve;
+        }),
+    );
+    renderHost();
+    const socket = await openHostSocket();
+    const user = userEvent.setup();
+
+    await user.click(
+      screen.getByRole("button", { name: "下载主持人审计" }),
+    );
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      socket.close(4003, "replaced");
+      resolveAudit?.(
+        jsonResponse(200, {
+          room_id: "room-1",
+          revision: 7,
+          state: { phase: "DAY_DISCUSSION" },
+          raw_events: [],
+          dm_trace: [],
+          snapshots: [],
+        }),
+      );
+    });
+
+    expect(createObjectURL).not.toHaveBeenCalled();
+    expect(anchorClick).not.toHaveBeenCalled();
+  });
+
   it("shows connection, room, revision, and audit diagnostics", async () => {
     writeHostSessionForRoom();
     renderHost();
@@ -436,7 +475,14 @@ describe("host control console", () => {
     expect(
       screen.queryByRole("button", { name: "暂停游戏" }),
     ).not.toBeInTheDocument();
+    expect(
+      globalThis.localStorage.getItem(
+        "werewolf:v1:room:ABCDEF:host",
+      ),
+    ).not.toBeNull();
     expect(readHostSession("ABCDEF")).toBeNull();
+    globalThis.sessionStorage.clear();
+    expect(readHostSession("ABCDEF")?.token).toBe("host-token");
   });
 
   it("expires a display pairing after its server TTL", async () => {
@@ -446,6 +492,7 @@ describe("host control console", () => {
       jsonResponse(201, {
         pairing_code: "482913",
         expires_at: expiresAt,
+        expires_in_seconds: 1,
       }),
     );
     renderHost();
@@ -466,5 +513,31 @@ describe("host control console", () => {
     expect(
       screen.getByText("配对码已失效，请重新生成。"),
     ).toBeVisible();
+  });
+
+  it("uses the server pairing TTL despite browser clock skew", async () => {
+    writeHostSessionForRoom();
+    const clientNow = Date.parse("2026-09-26T01:00:00.000Z");
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(clientNow);
+    fetchMock.mockResolvedValue(
+      jsonResponse(201, {
+        pairing_code: "482913",
+        expires_at: "2026-09-26T00:05:00.000Z",
+        expires_in_seconds: 300,
+      }),
+    );
+    renderHost();
+    await openHostSocket();
+    const user = userEvent.setup();
+
+    await user.click(
+      screen.getByRole("button", { name: "生成共享屏配对码" }),
+    );
+
+    expect(await screen.findByText("482913")).toBeVisible();
+    expect(
+      screen.queryByText("配对码已失效，请重新生成。"),
+    ).not.toBeInTheDocument();
+    nowSpy.mockRestore();
   });
 });
