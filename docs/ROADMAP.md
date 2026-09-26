@@ -18,13 +18,15 @@
 - [x] S2-13 交付门禁与独立复核。
 - [x] S2 最终验收修复：token/房间生命周期、连接关闭、协议纪律、
   日志脱敏与 latency CI 门禁。
+- [x] S3 React 前端：display/seat/host/replay 闭环、设计 token、
+  六浏览器确定性 E2E，以及前端和 E2E CI/根交付门禁。
 
 ## 下一步
 
-- [ ] S3 React 前端。
 - [ ] S4 AI DM。
 
 每项任务只有在实现、确定性测试、独立复核和用户验收都完成后才会标记为
 完成。正式版本只会在对应阶段的验收出口通过后发布。当前 S2 本地与 CI
-基线为 `395 passed, 6 skipped`，latency marker 为
-`4 passed, 2 skipped`。
+基线为 `487 passed, 6 skipped`，latency marker 为
+`4 passed, 2 skipped`；前端单元/组件测试为 `166 passed`，Playwright
+浏览器测试为 `3 passed`。CI 与根交付门禁同时覆盖后端和前端。

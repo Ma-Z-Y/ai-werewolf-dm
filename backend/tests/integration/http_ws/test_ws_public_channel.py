@@ -21,6 +21,7 @@ PUBLIC_VIEW_KEYS = {
     "vote_summary",
     "deadline_at",
     "paused",
+    "paused_at",
 }
 
 

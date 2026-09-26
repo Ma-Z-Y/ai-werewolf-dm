@@ -49,14 +49,18 @@ def public_event(room_id, event_type, payload, *, revision=0):
 
 def test_public_timeline_contains_only_public_events():
     core = core_at_day_vote()
-    event_by_id = {event.event_id: event for event in core.events}
+    expected = tuple(
+        (event.event_id, event.revision, event.event_type)
+        for event in core.events
+        if event.visibility.scope == "public"
+    )
+    actual = tuple(
+        (item.event_id, item.revision, item.event_type) for item in core.state.public_timeline
+    )
 
     assert core.state.public_timeline
-    for item in core.state.public_timeline:
-        event = event_by_id[item.event_id]
-        assert event.visibility.scope == "public"
-        assert item.revision == event.revision
-        assert item.event_type is event.event_type
+    assert actual == expected
+    assert len(actual) == len(set(actual))
 
 
 def test_public_timeline_excludes_private_event_ids_and_facts():
@@ -82,6 +86,33 @@ def test_public_timeline_excludes_private_event_ids_and_facts():
         "cause",
     ):
         assert secret not in statements
+
+
+def test_vote_resolution_and_exile_have_distinct_public_statements():
+    room_id = uuid4()
+    resolved = _public_statement(
+        public_event(
+            room_id,
+            EventType.VOTE_ROUND_RESOLVED,
+            VoteRoundResolvedPayload(
+                round_id=uuid4(),
+                tallies=(),
+                exiled_seat_id=3,
+                tie=False,
+            ),
+        )
+    )
+    exiled = _public_statement(
+        public_event(
+            room_id,
+            EventType.PLAYER_EXILED,
+            PlayerExiledPayload(seat_id=3),
+        )
+    )
+
+    assert resolved == "投票结果：3 号玩家得票最多"  # noqa: RUF001
+    assert exiled == "3 号玩家被放逐"
+    assert resolved != exiled
 
 
 def test_game_end_statement_contains_winner_without_private_roles():

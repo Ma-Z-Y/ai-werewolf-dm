@@ -8,6 +8,7 @@ from werewolf_dm.domain.contracts import (
     AuthenticatedActor,
     DomainEvent,
     FactionVisibility,
+    HostPausedPayload,
     HostVisibility,
     PublicVisibility,
     SeatVisibility,
@@ -25,7 +26,7 @@ from werewolf_dm.domain.replay import event_log_digest
 
 
 # Vote progress is projection metadata; the persisted domain summary stays unchanged.
-class VoteSummary(BaseVoteSummary):
+class PublicVoteProgress(BaseVoteSummary):
     submitted_count: int = Field(default=0, ge=0)
     eligible_count: int = Field(default=0, ge=0)
 
@@ -38,9 +39,10 @@ class PublicView(StrictModel):
     day: int = Field(ge=0)
     living_seats: list[int]
     public_timeline: list[PublicTimelineItem]
-    vote_summary: VoteSummary | None
+    vote_summary: PublicVoteProgress | None
     deadline_at: datetime | None
     paused: bool = False
+    paused_at: datetime | None = None
 
 
 class LegalAction(StrictModel):
@@ -88,7 +90,7 @@ def _living_others(state: GameState, seat_id: int) -> tuple[int, ...]:
     )
 
 
-def _active_vote_summary(state: GameState) -> VoteSummary | None:
+def _active_vote_summary(state: GameState) -> PublicVoteProgress | None:
     round_ = state.vote_round
     if (
         round_ is None
@@ -97,7 +99,7 @@ def _active_vote_summary(state: GameState) -> VoteSummary | None:
         or state.phase not in {Phase.DAY_VOTE, Phase.DAY_PK_VOTE}
     ):
         return None
-    return VoteSummary(
+    return PublicVoteProgress(
         round_id=round_.round_id,
         tallies=(),
         abstention_count=0,
@@ -313,6 +315,7 @@ def project_public_view(state: GameState) -> PublicView:
         vote_summary=_active_vote_summary(state),
         deadline_at=state.deadline_at,
         paused=state.paused,
+        paused_at=state.paused_at,
     )
 
 
@@ -351,6 +354,7 @@ def project_seat_view(
         vote_summary=_active_vote_summary(state),
         deadline_at=state.deadline_at,
         paused=state.paused,
+        paused_at=state.paused_at,
         seat_id=seat_id,
         role=player.role if player is not None else None,
         private_facts=tuple(
@@ -372,7 +376,7 @@ def project_player_replay(
     validated_events = _validate_event_log(state, events)
 
     visible_events = tuple(
-        event
+        _redact_player_replay_event(event)
         for event in validated_events
         if event.visibility.scope == "public"
         or (event.visibility.scope == "seat" and event.visibility.seat_id == actor.seat_id)
@@ -386,6 +390,14 @@ def project_player_replay(
         ),
         events=visible_events,
     )
+
+
+def _redact_player_replay_event(event: DomainEvent) -> DomainEvent:
+    if event.event_type is EventType.HOST_PAUSED:
+        return event.model_copy(
+            update={"fact_payload": HostPausedPayload(reason="主持人操作").model_dump(mode="json")}
+        )
+    return event
 
 
 def project_host_audit(

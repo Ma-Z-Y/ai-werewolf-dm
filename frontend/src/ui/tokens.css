@@ -1,0 +1,32 @@
+@import "tailwindcss";
+
+:root {
+  --ww-surface: oklch(0.19 0.02 70);
+  --ww-surface-raised: oklch(0.24 0.025 70);
+  --ww-text: oklch(0.96 0.015 80);
+  --ww-text-muted: oklch(0.74 0.02 80);
+  --ww-action: oklch(0.72 0.15 55);
+  --ww-danger: oklch(0.64 0.2 25);
+  --ww-success: oklch(0.68 0.13 150);
+  --ww-phase-night: oklch(0.25 0.05 275);
+  --ww-phase-day: oklch(0.89 0.08 85);
+}
+
+@theme {
+  --color-surface: var(--ww-surface);
+  --color-surface-raised: var(--ww-surface-raised);
+  --color-text: var(--ww-text);
+  --color-text-muted: var(--ww-text-muted);
+  --color-action: var(--ww-action);
+  --color-danger: var(--ww-danger);
+  --color-success: var(--ww-success);
+  --color-phase-night: var(--ww-phase-night);
+  --color-phase-day: var(--ww-phase-day);
+}
+
+@custom-variant night (
+  &:where([data-phase="night"], [data-phase="night"] *)
+);
+@custom-variant day (
+  &:where([data-phase="day"], [data-phase="day"] *)
+);

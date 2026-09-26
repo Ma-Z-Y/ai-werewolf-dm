@@ -65,6 +65,7 @@ PUBLIC_VIEW_KEYS = frozenset(
         "vote_summary",
         "deadline_at",
         "paused",
+        "paused_at",
     }
 )
 

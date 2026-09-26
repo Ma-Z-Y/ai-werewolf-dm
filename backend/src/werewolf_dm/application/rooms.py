@@ -924,16 +924,21 @@ class RoomRegistry:
         self._pairing_attempts[(room_id, source)] = (window_start, count + 1)
         return True
 
-    def create_display_pairing(self, room_code: str) -> tuple[str, datetime]:
+    def create_display_pairing(
+        self,
+        room_code: str,
+    ) -> tuple[str, datetime, int]:
         room = self.get_by_code(room_code)
         raw = f"{secrets.randbelow(1_000_000):06d}"
-        expires_at = self.clock() + timedelta(minutes=5)
+        now = self.clock()
+        expires_at = min(now + timedelta(minutes=5), room.expires_at)
+        expires_in_seconds = max(0, int((expires_at - now).total_seconds()))
         self._display_pairings[room.room_id] = DisplayPairing(
             pairing_code_digest=self.tokens.digest(raw),
             room_id=room.room_id,
             expires_at=expires_at,
         )
-        return raw, expires_at
+        return raw, expires_at, expires_in_seconds
 
     def exchange_display_pairing(
         self,

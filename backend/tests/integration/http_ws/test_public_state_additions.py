@@ -22,13 +22,15 @@ from werewolf_dm.application.rooms import (
     SeatViewUpdate,
     SessionReadyUpdate,
 )
+from werewolf_dm.domain.contracts import AuthenticatedActor
 from werewolf_dm.domain.model import GameState
 from werewolf_dm.domain.state_machine import initial_state
 from werewolf_dm.domain.visibility import (
     PublicView,
+    PublicVoteProgress,
     SeatView,
-    VoteSummary,
     project_public_view,
+    project_seat_view,
 )
 from werewolf_dm.interfaces.http_ws.app import create_app
 
@@ -76,7 +78,22 @@ def test_public_view_paused_tracks_state_without_exposing_reason() -> None:
 
     assert view.paused is True
     assert "reason" not in PublicView.model_fields
-    assert "paused_at" not in view.model_dump(mode="json")
+    assert view.paused_at == paused.paused_at
+
+
+def test_seat_view_paused_at_tracks_state() -> None:
+    paused_at = datetime(2026, 9, 25, tzinfo=UTC)
+    state = initial_state(room_id=uuid4(), seed=1001)
+    paused = GameState.revalidate(state.model_copy(update={"paused": True, "paused_at": paused_at}))
+
+    view = project_seat_view(
+        paused,
+        1,
+        AuthenticatedActor(actor_type="seat", seat_id=1, room_id=paused.room_id),
+    )
+
+    assert view.paused is True
+    assert view.paused_at == paused_at
 
 
 def test_active_vote_summary_counts_unique_submitters_without_tallies() -> None:
@@ -265,7 +282,7 @@ def test_projection_models_have_no_server_time() -> None:
     assert "server_time" not in SeatView.model_fields
     assert "server_time" not in HostControlView.model_fields
     assert "server_time" not in RoomSnapshot.model_fields
-    assert "server_time" not in VoteSummary.model_fields
+    assert "server_time" not in PublicVoteProgress.model_fields
 
 
 def test_production_app_has_no_test_control_route() -> None:

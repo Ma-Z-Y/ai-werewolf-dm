@@ -1,20 +1,20 @@
 ---
 spec_id: s3-frontend-design
-version: 1.0.0
+version: 1.1.0
 status: frozen
 proposed_at: 2026-09-25
-frozen_at: 2026-09-25
+frozen_at: 2026-09-26
 owner: engineering
 depends_on:
   - product-constitution@1.1.0
   - system-design@1.1.0
-  - verification-matrix@1.2.0
+  - verification-matrix@1.3.0
   - s2-realtime-interface-design@1.2.0
   - s3-frontend-constitution@1.1.0
 supersedes: null
 ---
 
-# S3 前端与协议预检设计 v1.0
+# S3 前端与协议预检设计 v1.1
 
 ## 1. 目标与边界
 
@@ -321,7 +321,8 @@ Authorization: Bearer <host-token>
 ```json
 {
   "pairing_code": "482913",
-  "expires_at": "2026-09-25T09:05:00Z"
+  "expires_at": "2026-09-25T09:05:00Z",
+  "expires_in_seconds": 300
 }
 ```
 
@@ -331,6 +332,8 @@ Authorization: Bearer <host-token>
 - 新配对码替换同房间旧的未消费配对码。
 - pairing code 为 6 位数字，服务端只保存 SHA-256 摘要。
 - 固定 TTL 为 5 分钟。
+- 响应同时返回由同一服务端时钟计算的 `expires_in_seconds`；客户端不得用
+  浏览器墙钟直接解释 `expires_at`。
 
 用配对码创建 display 会话：
 
@@ -435,10 +438,16 @@ display subscriber；过期房间不能留下配对状态。
 
 ```python
 paused: bool = False
+paused_at: datetime | None = None
 ```
 
-`project_public_view()` 和 `project_seat_view()` 都从 `GameState.paused` 赋值。
-SeatView 继续继承 PublicView。
+`project_public_view()` 和 `project_seat_view()` 都从 `GameState.paused` 和
+`GameState.paused_at` 赋值。SeatView 继续继承 PublicView。
+
+`paused_at` 是纯状态投影，不读取当前时钟。它只用于让新挂载或刷新后的
+客户端恢复服务端冻结的剩余时间；暂停时剩余时间按
+`deadline_at - paused_at` 计算，恢复后服务端平移 deadline 并清空
+`paused_at`。
 
 暂停和恢复仍通过 `GameCore.submit()` 产生 revision 和广播；前端不根据错误或
 本地计时猜测暂停。
@@ -606,6 +615,7 @@ ready -> replaced / expired / closed
 - `deadlineAt`。
 - `serverTime`。
 - `paused`。
+- `pausedAt`。
 
 收到更新时：
 
@@ -860,6 +870,13 @@ S3-P0 只有同时满足以下条件才算完成：
 | host recovery 假入口 | 显式禁用说明并记录未来 `S3-R` |
 
 ## 22. Changelog
+
+### v1.1.0 - 2026-09-26
+
+- 增加 `PublicView.paused_at`，修复共享屏暂停期间刷新后倒计时从错误
+  剩余量恢复的问题。
+- display pairing 响应增加 `expires_in_seconds`，消除客户端时钟偏差导致
+  有效配对码被提前判废或失效码继续显示的问题。
 
 ### v1.0.0 - 2026-09-25
 

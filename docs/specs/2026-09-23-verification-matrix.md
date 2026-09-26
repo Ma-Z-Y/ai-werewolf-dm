@@ -1,6 +1,6 @@
 ---
 spec_id: verification-matrix
-version: 1.2.0
+version: 1.3.0
 status: frozen
 frozen_at: 2026-09-23
 owner: quality
@@ -11,7 +11,7 @@ depends_on:
   - s3-frontend-constitution@1.1.0
 ---
 
-# AI 狼人杀 DM 验证矩阵 v1.2
+# AI 狼人杀 DM 验证矩阵 v1.3
 
 ## 1. 测试原则
 
@@ -319,9 +319,9 @@ Codex 环境下使用项目脚本和交付前检查等价实现，不依赖 Clau
 | --- | --- | --- |
 | `S3-P0-001` | display token 订阅 | 只获得 public；seat/host.control 返回 `CHANNEL_FORBIDDEN` |
 | `S3-P0-002` | display 命令 | 返回 `ACTOR_NOT_AUTHORIZED`，状态和 revision 不变 |
-| `S3-P0-003` | display 配对 | cross-room 拒绝；5 分钟到期；5 次失败失效；来源限流为 429 |
+| `S3-P0-003` | display 配对 | cross-room 拒绝；5 分钟到期；服务端返回 expires_in_seconds；5 次失败失效；来源限流为 429 |
 | `S3-P0-004` | display 轮换 | 同 token 重连为 4003；轮换旧 session 为 4001；新 session 存活 |
-| `S3-P0-005` | 公共暂停 | `PublicView.paused` 与 `GameState.paused` 一致且不泄漏原因 |
+| `S3-P0-005` | 公共暂停 | `PublicView.paused/paused_at` 与纯状态一致；不泄漏原因；暂停后刷新仍恢复冻结剩余时间 |
 | `S3-P0-006` | 传输时间 | 四类 WS update 都含同一采样 `server_time`；纯投影不含该字段 |
 | `S3-P0-007` | 投票进度 | `DAY_VOTE`/`DAY_PK_VOTE` 只有 submitted/eligible 聚合计数 |
 | `S3-P0-008` | 公共时间线 | 只收公开事件；平安夜/平票/超时/暂停/恢复/终局均为中文稳定文案；不改变 state hash |
@@ -330,6 +330,11 @@ Codex 环境下使用项目脚本和交付前检查等价实现，不依赖 Clau
 | `S3-A11Y-001` | 320x568 | 主要玩家状态无水平溢出，可见按钮/链接/role=button 目标至少 44x44 |
 
 ## 14. Changelog
+
+### v1.3.0 - 2026-09-26
+
+- S3-P0-005 增加 `paused_at` 纯投影与暂停期间重新挂载后的冻结计时回归。
+- S3-P0-003 增加服务端相对 TTL，避免客户端时钟偏差误判配对码。
 
 ### v1.2.0 - 2026-09-25
 
