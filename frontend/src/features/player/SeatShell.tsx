@@ -3,8 +3,10 @@ import { Check, CircleX, Moon, Sun, Wifi, WifiOff } from "lucide-react";
 import type { LegalAction, SeatView } from "../../protocol/models";
 import type { RoomSocketState } from "../../realtime/RoomSocket";
 
+import { DayDiscussionScreen } from "./DayDiscussionScreen";
 import { NightActionScreen } from "./NightActionScreen";
 import { RoleRevealSheet } from "./RoleRevealSheet";
+import { VoteScreen } from "./VoteScreen";
 
 export interface SeatShellProps {
   roomCode: string;
@@ -83,6 +85,15 @@ export function SeatShell({
     seatView.legal_actions.find(
       (legalAction) => legalAction.action === "CONFIRM_ROLE",
     ) ?? null;
+  const isDayDiscussion =
+    seatView.phase === "DAY_DISCUSSION" ||
+    seatView.phase === "DAY_PK_DISCUSSION";
+  const isDayVote =
+    seatView.phase === "DAY_VOTE" || seatView.phase === "DAY_PK_VOTE";
+  const isCurrentSpeaker = seatView.legal_actions.some(
+    (action) =>
+      action.action === "SPEAK" || action.action === "PASS_SPEECH",
+  );
   const recentTimeline = seatView.public_timeline.slice(-3);
 
   return (
@@ -157,6 +168,26 @@ export function SeatShell({
               key={`${seatView.revision}:${seatView.phase}`}
               onAction={onAction}
               role={seatView.role}
+            />
+          ) : isDayDiscussion ? (
+            <DayDiscussionScreen
+              actions={seatView.legal_actions}
+              currentSpeakerSeatId={isCurrentSpeaker ? seatId : null}
+              deadlineAt={seatView.deadline_at}
+              disabled={actionPending}
+              key={seatView.phase}
+              onAction={onAction}
+              phase={seatView.phase}
+              seatId={seatId}
+            />
+          ) : isDayVote ? (
+            <VoteScreen
+              actions={seatView.legal_actions}
+              disabled={actionPending}
+              key={`${seatView.phase}:${seatView.vote_summary?.round_id ?? "none"}`}
+              onAction={onAction}
+              phase={seatView.phase}
+              voteSummary={seatView.vote_summary}
             />
           ) : (
             <p className="text-sm text-text-muted">等待下一步行动</p>

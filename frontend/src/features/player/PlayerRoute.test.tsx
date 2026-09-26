@@ -157,6 +157,36 @@ function nightSeatView({
   };
 }
 
+function daySeatView({
+  phase,
+  actions,
+  voteSummary = null,
+  revision = 20,
+  seatId = 1,
+}: {
+  phase: string;
+  actions: Array<{
+    action: CommandType;
+    targetSeatIds?: number[];
+  }>;
+  voteSummary?: SeatView["vote_summary"];
+  revision?: number;
+  seatId?: number;
+}): SeatView {
+  return {
+    ...seatView(revision, { legalActions: [] }),
+    phase,
+    day: 1,
+    seat_id: seatId,
+    vote_summary: voteSummary,
+    legal_actions: actions.map(({ action, targetSeatIds = [] }) => ({
+      action,
+      target_seat_ids: targetSeatIds,
+      deadline_at: "2099-01-01T00:01:00.000Z",
+    })),
+  };
+}
+
 function sessionReady(
   view: ReturnType<typeof seatView> | null,
   revision = view?.revision ?? 0,
@@ -732,6 +762,462 @@ describe("player entry flow", () => {
     await user.click(confirm);
 
     expect(commandFrames(socket)).toHaveLength(0);
+  });
+
+  it("sends trimmed SPEAK from the day discussion screen", async () => {
+    const user = userEvent.setup();
+    writeSeatSession({
+      schemaVersion: 1,
+      roomCode: "ABCDEF",
+      roomId: "room-1",
+      seatId: 1,
+      token: "seat-token",
+      expiresAt: "2099-01-01T00:00:00.000Z",
+    });
+
+    renderPlayerRoute("/play/ABCDEF");
+    const socket = await openLatestSocket(
+      sessionReady(
+        daySeatView({
+          phase: "DAY_DISCUSSION",
+          actions: [{ action: "SPEAK" }, { action: "PASS_SPEECH" }],
+        }),
+        20,
+      ),
+    );
+
+    await user.type(
+      await screen.findByRole("textbox", { name: "发言内容" }),
+      "  我是好人  ",
+    );
+    await user.click(screen.getByRole("button", { name: "发送发言" }));
+
+    expect(socket.sentLast()).toMatchObject({
+      type: "command",
+      command: {
+        expected_revision: 20,
+        payload: { command_type: "SPEAK", text: "我是好人" },
+      },
+    });
+  });
+
+  it.each([
+    [
+      "PASS_SPEECH",
+      { command_type: "PASS_SPEECH" },
+      async (user: ReturnType<typeof userEvent.setup>) => {
+        await user.click(screen.getByRole("button", { name: "跳过发言" }));
+      },
+    ],
+    [
+      "VOTE",
+      { command_type: "VOTE", target_seat_id: 4 },
+      async (user: ReturnType<typeof userEvent.setup>) => {
+        await user.click(await screen.findByTestId("vote-target-4"));
+        await user.click(screen.getByRole("button", { name: "确认投票" }));
+      },
+    ],
+    [
+      "ABSTAIN",
+      { command_type: "ABSTAIN" },
+      async (user: ReturnType<typeof userEvent.setup>) => {
+        await user.click(screen.getByRole("button", { name: "弃票" }));
+      },
+    ],
+  ])(
+    "sends the exact %s command from the player route",
+    async (action, payload, submit) => {
+      const user = userEvent.setup();
+      writeSeatSession({
+        schemaVersion: 1,
+        roomCode: "ABCDEF",
+        roomId: "room-1",
+        seatId: 1,
+        token: "seat-token",
+        expiresAt: "2099-01-01T00:00:00.000Z",
+      });
+
+      const isVote = action === "VOTE" || action === "ABSTAIN";
+      const actions = isVote
+        ? [
+            { action: "VOTE" as CommandType, targetSeatIds: [2, 4] },
+            { action: "ABSTAIN" as CommandType },
+          ]
+        : [{ action: "PASS_SPEECH" as CommandType }];
+
+      renderPlayerRoute("/play/ABCDEF");
+      const socket = await openLatestSocket(
+        sessionReady(
+          daySeatView({
+            phase: isVote ? "DAY_VOTE" : "DAY_DISCUSSION",
+            actions,
+            voteSummary: isVote
+              ? {
+                  round_id: "round-1",
+                  tallies: [],
+                  abstention_count: 0,
+                  closed: false,
+                  submitted_count: 2,
+                  eligible_count: 6,
+                }
+              : null,
+          }),
+          20,
+        ),
+      );
+
+      await submit(user);
+
+      expect(socket.sentLast()).toMatchObject({
+        type: "command",
+        command: {
+          expected_revision: 20,
+          payload,
+        },
+      });
+    },
+  );
+
+  it("keeps a vote target selected when aggregate progress changes", async () => {
+    const user = userEvent.setup();
+    writeSeatSession({
+      schemaVersion: 1,
+      roomCode: "ABCDEF",
+      roomId: "room-1",
+      seatId: 1,
+      token: "seat-token",
+      expiresAt: "2099-01-01T00:00:00.000Z",
+    });
+
+    renderPlayerRoute("/play/ABCDEF");
+    const socket = await openLatestSocket(
+      sessionReady(
+        daySeatView({
+          phase: "DAY_VOTE",
+          actions: [
+            { action: "VOTE", targetSeatIds: [2, 4] },
+            { action: "ABSTAIN" },
+          ],
+          voteSummary: {
+            round_id: "round-1",
+            tallies: [],
+            abstention_count: 0,
+            closed: false,
+            submitted_count: 2,
+            eligible_count: 6,
+          },
+        }),
+        20,
+      ),
+    );
+
+    await user.click(await screen.findByTestId("vote-target-4"));
+    expect(screen.getByRole("button", { name: "确认投票" })).toBeEnabled();
+
+    await act(async () => {
+      socket.message(
+        seatViewUpdate(
+          daySeatView({
+            phase: "DAY_VOTE",
+            actions: [
+              { action: "VOTE", targetSeatIds: [2, 4] },
+              { action: "ABSTAIN" },
+            ],
+            voteSummary: {
+              round_id: "round-1",
+              tallies: [],
+              abstention_count: 0,
+              closed: false,
+              submitted_count: 3,
+              eligible_count: 6,
+            },
+            revision: 21,
+          }),
+          2,
+        ),
+      );
+    });
+
+    expect(screen.getByTestId("vote-target-4")).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByRole("button", { name: "确认投票" })).toBeEnabled();
+  });
+
+  it("keeps a discussion draft when aggregate state advances", async () => {
+    const user = userEvent.setup();
+    writeSeatSession({
+      schemaVersion: 1,
+      roomCode: "ABCDEF",
+      roomId: "room-1",
+      seatId: 1,
+      token: "seat-token",
+      expiresAt: "2099-01-01T00:00:00.000Z",
+    });
+
+    renderPlayerRoute("/play/ABCDEF");
+    const socket = await openLatestSocket(
+      sessionReady(
+        daySeatView({
+          phase: "DAY_DISCUSSION",
+          actions: [{ action: "SPEAK" }, { action: "PASS_SPEECH" }],
+        }),
+        20,
+      ),
+    );
+
+    const input = await screen.findByRole("textbox", { name: "发言内容" });
+    await user.type(input, "尚未发送的草稿");
+
+    await act(async () => {
+      socket.message(
+        seatViewUpdate(
+          daySeatView({
+            phase: "DAY_DISCUSSION",
+            actions: [{ action: "SPEAK" }, { action: "PASS_SPEECH" }],
+            revision: 21,
+          }),
+          2,
+        ),
+      );
+    });
+
+    expect(screen.getByRole("textbox", { name: "发言内容" })).toHaveValue(
+      "尚未发送的草稿",
+    );
+  });
+
+  it("resets a vote target when the vote round changes", async () => {
+    const user = userEvent.setup();
+    writeSeatSession({
+      schemaVersion: 1,
+      roomCode: "ABCDEF",
+      roomId: "room-1",
+      seatId: 1,
+      token: "seat-token",
+      expiresAt: "2099-01-01T00:00:00.000Z",
+    });
+
+    renderPlayerRoute("/play/ABCDEF");
+    const socket = await openLatestSocket(
+      sessionReady(
+        daySeatView({
+          phase: "DAY_VOTE",
+          actions: [
+            { action: "VOTE", targetSeatIds: [2, 4] },
+            { action: "ABSTAIN" },
+          ],
+          voteSummary: {
+            round_id: "round-1",
+            tallies: [],
+            abstention_count: 0,
+            closed: false,
+            submitted_count: 2,
+            eligible_count: 6,
+          },
+        }),
+        20,
+      ),
+    );
+
+    await user.click(await screen.findByTestId("vote-target-4"));
+    expect(screen.getByRole("button", { name: "确认投票" })).toBeEnabled();
+
+    await act(async () => {
+      socket.message(
+        seatViewUpdate(
+          daySeatView({
+            phase: "DAY_VOTE",
+            actions: [
+              { action: "VOTE", targetSeatIds: [2, 4] },
+              { action: "ABSTAIN" },
+            ],
+            voteSummary: {
+              round_id: "round-2",
+              tallies: [],
+              abstention_count: 0,
+              closed: false,
+              submitted_count: 0,
+              eligible_count: 6,
+            },
+            revision: 21,
+          }),
+          2,
+        ),
+      );
+    });
+
+    expect(screen.getByTestId("vote-target-4")).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    expect(screen.getByRole("button", { name: "确认投票" })).toBeDisabled();
+  });
+
+  it("disables duplicate day actions until the server acknowledges", async () => {
+    const user = userEvent.setup();
+    writeSeatSession({
+      schemaVersion: 1,
+      roomCode: "ABCDEF",
+      roomId: "room-1",
+      seatId: 1,
+      token: "seat-token",
+      expiresAt: "2099-01-01T00:00:00.000Z",
+    });
+
+    renderPlayerRoute("/play/ABCDEF");
+    const socket = await openLatestSocket(
+      sessionReady(
+        daySeatView({
+          phase: "DAY_DISCUSSION",
+          actions: [{ action: "SPEAK" }, { action: "PASS_SPEECH" }],
+        }),
+        20,
+      ),
+    );
+
+    await user.type(
+      await screen.findByRole("textbox", { name: "发言内容" }),
+      "只说一次",
+    );
+    const send = screen.getByRole("button", { name: "发送发言" });
+    await user.click(send);
+    await user.click(send);
+
+    expect(commandFrames(socket)).toHaveLength(1);
+    expect(send).toBeDisabled();
+
+    await act(async () => {
+      socket.message(commandAck(commandId(commandFrames(socket)[0])));
+    });
+
+    expect(send).toBeEnabled();
+  });
+
+  it("retries a day intent with the latest revision after a conflict", async () => {
+    const user = userEvent.setup();
+    writeSeatSession({
+      schemaVersion: 1,
+      roomCode: "ABCDEF",
+      roomId: "room-1",
+      seatId: 1,
+      token: "seat-token",
+      expiresAt: "2099-01-01T00:00:00.000Z",
+    });
+
+    renderPlayerRoute("/play/ABCDEF");
+    const socket = await openLatestSocket(
+      sessionReady(
+        daySeatView({
+          phase: "DAY_DISCUSSION",
+          actions: [{ action: "SPEAK" }, { action: "PASS_SPEECH" }],
+        }),
+        20,
+      ),
+    );
+
+    await user.type(
+      await screen.findByRole("textbox", { name: "发言内容" }),
+      "最新发言",
+    );
+    await user.click(screen.getByRole("button", { name: "发送发言" }));
+    const first = commandFrames(socket)[0];
+
+    await act(async () => {
+      socket.message(
+        seatViewUpdate(
+          daySeatView({
+            phase: "DAY_DISCUSSION",
+            actions: [{ action: "SPEAK" }, { action: "PASS_SPEECH" }],
+            revision: 21,
+          }),
+          2,
+        ),
+      );
+      socket.message(
+        commandAck(commandId(first), false, "REVISION_CONFLICT"),
+      );
+    });
+
+    expect(commandFrames(socket)).toHaveLength(2);
+    expect(socket.sentLast()).toMatchObject({
+      type: "command",
+      command: {
+        expected_revision: 21,
+        payload: { command_type: "SPEAK", text: "最新发言" },
+      },
+    });
+  });
+
+  it("does not retry a stale day target removed from legal actions", async () => {
+    const user = userEvent.setup();
+    writeSeatSession({
+      schemaVersion: 1,
+      roomCode: "ABCDEF",
+      roomId: "room-1",
+      seatId: 1,
+      token: "seat-token",
+      expiresAt: "2099-01-01T00:00:00.000Z",
+    });
+
+    renderPlayerRoute("/play/ABCDEF");
+    const socket = await openLatestSocket(
+      sessionReady(
+        daySeatView({
+          phase: "DAY_VOTE",
+          actions: [
+            { action: "VOTE", targetSeatIds: [2, 4] },
+            { action: "ABSTAIN" },
+          ],
+          voteSummary: {
+            round_id: "round-1",
+            tallies: [],
+            abstention_count: 0,
+            closed: false,
+            submitted_count: 2,
+            eligible_count: 6,
+          },
+        }),
+        20,
+      ),
+    );
+
+    await user.click(await screen.findByTestId("vote-target-4"));
+    await user.click(screen.getByRole("button", { name: "确认投票" }));
+    const first = commandFrames(socket)[0];
+
+    await act(async () => {
+      socket.message(
+        seatViewUpdate(
+          daySeatView({
+            phase: "DAY_VOTE",
+            actions: [
+              { action: "VOTE", targetSeatIds: [2] },
+              { action: "ABSTAIN" },
+            ],
+            voteSummary: {
+              round_id: "round-1",
+              tallies: [],
+              abstention_count: 0,
+              closed: false,
+              submitted_count: 3,
+              eligible_count: 6,
+            },
+            revision: 21,
+          }),
+          2,
+        ),
+      );
+      socket.message(
+        commandAck(commandId(first), false, "REVISION_CONFLICT"),
+      );
+    });
+
+    expect(commandFrames(socket)).toHaveLength(1);
+    expect(
+      await screen.findByText("行动已失效，请重新选择"),
+    ).toBeVisible();
   });
 
   it.each([

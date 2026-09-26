@@ -18,6 +18,10 @@ import {
   type StoredSeatSession,
 } from "../../session/storage";
 
+import {
+  dayPayload,
+  isDayActionName,
+} from "./DayDiscussionScreen";
 import { JoinRoomScreen } from "./JoinRoomScreen";
 import { nightPayload } from "./NightActionScreen";
 import { PlayerLobbyScreen } from "./PlayerLobbyScreen";
@@ -118,6 +122,7 @@ export function PlayerRoute() {
   const [confirmPending, setConfirmPending] = useState(false);
   const [roleConfirmed, setRoleConfirmed] = useState(false);
   const [nightPending, setNightPending] = useState(false);
+  const [dayPending, setDayPending] = useState(false);
   const [displayName, setDisplayName] = useState(() =>
     readStoredDisplayName(roomCode),
   );
@@ -140,6 +145,12 @@ export function PlayerRoute() {
     targetSeatId: number | null;
   } | null>(null);
   const nightCommandRef = useRef<string | null>(null);
+  const dayIntentRef = useRef<{
+    action: LegalAction;
+    targetSeatId: number | null;
+    text: string | null;
+  } | null>(null);
+  const dayCommandRef = useRef<string | null>(null);
 
   const sendCommand = useCallback(
     (
@@ -196,6 +207,36 @@ export function PlayerRoute() {
     [sendCommand],
   );
 
+  const sendDayAction = useCallback(
+    (
+      action: LegalAction,
+      targetSeatId: number | null,
+      text: string | null,
+      expectedRevision: number,
+      commandSession: StoredSeatSession,
+    ): string | null => {
+      let payload;
+      try {
+        payload = dayPayload(action, targetSeatId, text);
+      } catch {
+        setErrorMessage("行动内容无效，请重新输入");
+        return null;
+      }
+
+      const id = sendCommand(payload, expectedRevision, commandSession);
+      if (id === null) {
+        setErrorMessage("连接尚未就绪，请重试");
+        return null;
+      }
+      dayIntentRef.current = { action, targetSeatId, text };
+      dayCommandRef.current = id;
+      setDayPending(true);
+      setErrorMessage(null);
+      return id;
+    },
+    [sendCommand],
+  );
+
   const expireSession = useCallback((expiredSession: StoredSeatSession | null) => {
     if (expiredSession !== null) {
       clearStoredSeatSession(expiredSession.roomCode);
@@ -206,11 +247,14 @@ export function PlayerRoute() {
     confirmCommandRef.current = null;
     nightIntentRef.current = null;
     nightCommandRef.current = null;
+    dayIntentRef.current = null;
+    dayCommandRef.current = null;
     setJoinPending(false);
     setReady(false);
     setConfirmPending(false);
     setRoleConfirmed(false);
     setNightPending(false);
+    setDayPending(false);
     setSeatView(null);
     seatViewRef.current = null;
     setErrorMessage("会话已过期，请重新加入");
@@ -228,8 +272,11 @@ export function PlayerRoute() {
           confirmCommandRef.current = null;
           nightIntentRef.current = null;
           nightCommandRef.current = null;
+          dayIntentRef.current = null;
+          dayCommandRef.current = null;
           setConfirmPending(false);
           setNightPending(false);
+          setDayPending(false);
         }
         return;
       }
@@ -331,6 +378,12 @@ export function PlayerRoute() {
             setNightPending(false);
             setErrorMessage(null);
           }
+          if (message.command_id === dayCommandRef.current) {
+            dayCommandRef.current = null;
+            dayIntentRef.current = null;
+            setDayPending(false);
+            setErrorMessage(null);
+          }
           return;
         }
 
@@ -412,6 +465,48 @@ export function PlayerRoute() {
             return;
           }
         }
+        if (message.command_id === dayCommandRef.current) {
+          const dayIntent = dayIntentRef.current;
+          const latestView = seatViewRef.current;
+          const latestAction =
+            dayIntent === null || latestView === null
+              ? null
+              : latestView.legal_actions.find(
+                  (action) => action.action === dayIntent.action.action,
+                ) ?? null;
+          dayCommandRef.current = null;
+          dayIntentRef.current = null;
+          setDayPending(false);
+          if (
+            message.error_code === "REVISION_CONFLICT" &&
+            dayIntent !== null &&
+            latestView !== null &&
+            session !== null
+          ) {
+            if (latestAction === null) {
+              setErrorMessage("行动已失效，请重新选择");
+              return;
+            }
+            try {
+              dayPayload(
+                latestAction,
+                dayIntent.targetSeatId,
+                dayIntent.text,
+              );
+            } catch {
+              setErrorMessage("行动已失效，请重新选择");
+              return;
+            }
+            sendDayAction(
+              latestAction,
+              dayIntent.targetSeatId,
+              dayIntent.text,
+              latestView.revision,
+              session,
+            );
+            return;
+          }
+        }
         setErrorMessage(toAppError({ code: message.error_code }, 0).message);
         return;
       }
@@ -424,7 +519,13 @@ export function PlayerRoute() {
         setErrorMessage(toAppError({ code: message.code }, 0).message);
       }
     },
-    [expireSession, sendCommand, sendNightAction, session],
+    [
+      expireSession,
+      sendCommand,
+      sendDayAction,
+      sendNightAction,
+      session,
+    ],
   );
 
   const socketConfig =
@@ -450,6 +551,8 @@ export function PlayerRoute() {
       confirmCommandRef.current = null;
       nightIntentRef.current = null;
       nightCommandRef.current = null;
+      dayIntentRef.current = null;
+      dayCommandRef.current = null;
     };
   }, []);
 
@@ -472,6 +575,7 @@ export function PlayerRoute() {
     setConfirmPending(false);
     setRoleConfirmed(false);
     setNightPending(false);
+    setDayPending(false);
     setErrorMessage(null);
   }
 
@@ -497,8 +601,21 @@ export function PlayerRoute() {
   function handleSeatAction(
     action: LegalAction,
     targetSeatId: number | null = null,
+    text: string | null = null,
   ) {
     if (session === null || seatView === null) {
+      return;
+    }
+
+    if (isDayActionName(action.action)) {
+      if (dayPending || dayCommandRef.current !== null) return;
+      sendDayAction(
+        action,
+        targetSeatId,
+        text,
+        seatView.revision,
+        session,
+      );
       return;
     }
 
@@ -548,7 +665,7 @@ export function PlayerRoute() {
     return (
       <SeatShell
         actionConfirmed={roleConfirmed}
-        actionPending={confirmPending || nightPending}
+        actionPending={confirmPending || nightPending || dayPending}
         connectionState={connectionState}
         errorMessage={errorMessage}
         onAction={handleSeatAction}
