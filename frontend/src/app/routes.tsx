@@ -5,6 +5,7 @@ import {
 } from "react-router-dom";
 
 import { PlayerRoute } from "../features/player/PlayerRoute";
+import { StageRoute } from "../features/stage/StageRoute";
 
 import { HomeScreen } from "./HomeScreen";
 
@@ -25,11 +26,17 @@ function HostRoutePlaceholder() {
   );
 }
 
+function StageRouteEntry() {
+  const { roomCode = "" } = useParams();
+  return <StageRoute key={roomCode} />;
+}
+
 const routes: RouteObject[] = [
   { path: "/", element: <HomeScreen /> },
   { path: "/host/:roomCode", element: <HostRoutePlaceholder /> },
   { path: "/join/:roomCode?", element: <PlayerRouteEntry /> },
   { path: "/play/:roomCode", element: <PlayerRouteEntry /> },
+  { path: "/stage/:roomCode", element: <StageRouteEntry /> },
 ];
 
 export function AppRoutes() {
