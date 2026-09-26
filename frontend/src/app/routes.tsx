@@ -1,19 +1,36 @@
-import { useRoutes, type RouteObject } from "react-router-dom";
+import {
+  useParams,
+  useRoutes,
+  type RouteObject,
+} from "react-router-dom";
 
-function HomeRoute() {
+import { PlayerRoute } from "../features/player/PlayerRoute";
+
+import { HomeScreen } from "./HomeScreen";
+
+function PlayerRouteEntry() {
+  const { roomCode = "" } = useParams();
+  return <PlayerRoute key={roomCode} />;
+}
+
+function HostRoutePlaceholder() {
+  const { roomCode = "" } = useParams();
   return (
     <main className="grid min-h-screen place-items-center bg-surface px-6 py-12 text-text">
       <section className="grid gap-3 text-center">
-        <p className="text-sm font-medium text-text-muted">
-          AI 主持 · 真人玩家
-        </p>
-        <h1 className="text-4xl font-semibold">狼人杀 DM</h1>
+        <p className="text-sm font-medium text-text-muted">主持人房间</p>
+        <h1 className="text-3xl font-semibold">房间码 {roomCode}</h1>
       </section>
     </main>
   );
 }
 
-const routes: RouteObject[] = [{ path: "/", element: <HomeRoute /> }];
+const routes: RouteObject[] = [
+  { path: "/", element: <HomeScreen /> },
+  { path: "/host/:roomCode", element: <HostRoutePlaceholder /> },
+  { path: "/join/:roomCode?", element: <PlayerRouteEntry /> },
+  { path: "/play/:roomCode", element: <PlayerRouteEntry /> },
+];
 
 export function AppRoutes() {
   return useRoutes(routes);
