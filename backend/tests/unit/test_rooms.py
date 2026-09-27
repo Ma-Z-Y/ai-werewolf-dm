@@ -70,6 +70,52 @@ def test_create_room_returns_unique_code_and_host_token() -> None:
     assert record.expires_at == created.expires_at
 
 
+@pytest.mark.asyncio
+async def test_uuid_source_injection_controls_room_session_and_display_ids() -> None:
+    ids = iter((UUID(int=101), UUID(int=102), UUID(int=103)))
+
+    class Subscriber:
+        def __init__(self) -> None:
+            self.subscription_id = UUID(int=999)
+            self.actor_type = "seat"
+            self.seat_id = 1
+            self.session_id = None
+            self.channels = frozenset({"public", "seat"})
+            self.close_codes: list[int] = []
+
+        def offer(self, message: object) -> bool:
+            del message
+            return True
+
+        def request_close(self, code: int) -> None:
+            self.close_codes.append(code)
+
+    registry = RoomRegistry(
+        clock=FrozenClock(datetime(2026, 9, 24, tzinfo=UTC)),
+        token_source=SequenceTokenSource(
+            tokens=("host-token", "display-token"),
+            room_codes=("ROOM01",),
+        ),
+        seed_source=lambda: 101,
+        uuid_source=lambda: next(ids),
+    )
+
+    created = registry.create_room(timedelta(hours=6))
+    actor = registry.rooms[created.room_code]
+    await actor.start()
+    await actor.attach_subscriber(Subscriber())
+
+    assert created.room_id == UUID(int=101)
+    assert actor.seat_session_id(1) == UUID(int=102)
+
+    display_token, _ = registry.tokens.issue_display(
+        created.room_id,
+        timedelta(hours=1),
+    )
+    assert registry.tokens.resolve(display_token).session_id == UUID(int=103)
+    await actor.stop()
+
+
 def test_create_room_limits_room_code_retries() -> None:
     class CountingRoomCodeSource:
         def __init__(self) -> None:

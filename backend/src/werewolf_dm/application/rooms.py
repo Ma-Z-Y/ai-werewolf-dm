@@ -48,6 +48,7 @@ from werewolf_dm.domain.visibility import (
 )
 
 _DM_CATALOG_VERSION = "s4-template-v1"
+UuidSource = Callable[[], UUID]
 
 
 class TokenSource(Protocol):
@@ -313,9 +314,16 @@ class TimerScheduler:
 
 
 class TokenService:
-    def __init__(self, source: TokenSource, clock: Clock) -> None:
+    def __init__(
+        self,
+        source: TokenSource,
+        clock: Clock,
+        *,
+        uuid_source: UuidSource = uuid4,
+    ) -> None:
         self.source = source
         self.clock = clock
+        self._uuid_source = uuid_source
         self._records: dict[str, TokenRecord] = {}
         self._seat_records: dict[UUID, dict[int, TokenRecord]] = {}
         self._display_records: dict[UUID, TokenRecord] = {}
@@ -391,7 +399,7 @@ class TokenService:
             token_digest=self.digest(raw),
             room_id=room_id,
             actor_type="display",
-            session_id=uuid4(),
+            session_id=self._uuid_source(),
             issued_at=issued_at,
             expires_at=expires_at,
         )
@@ -430,6 +438,7 @@ class RoomActor:
         core: GameCore | None = None,
         dm_service: TemplateDMService | None = None,
         monotonic_ms: Callable[[], int] | None = None,
+        uuid_source: UuidSource = uuid4,
     ) -> None:
         self.room_id = room_id
         self.room_code = room_code
@@ -466,6 +475,7 @@ class RoomActor:
         self._seat_subscription_ids: dict[int, UUID] = {}
         self._monotonic_ms_source = monotonic_ms or (lambda: monotonic_ns() // 1_000_000)
         self._fixed_monotonic_ms: int | None = None
+        self._uuid_source = uuid_source
 
     @property
     def client_outbox_seq(self) -> int:
@@ -773,7 +783,7 @@ class RoomActor:
         elapsed_ms: int,
     ) -> None:
         trace = DMTraceRecord(
-            trace_id=uuid4(),
+            trace_id=self._uuid_source(),
             intent_id=intent.intent_id,
             template_variant_id=intent.template_variant_id,
             catalog_version=intent.catalog_version,
@@ -1025,7 +1035,7 @@ class RoomActor:
                     and subscriber.seat_id is not None
                     and (event.initial or subscriber.seat_id not in self.seat_session_ids)
                 ):
-                    self.seat_session_ids[subscriber.seat_id] = uuid4()
+                    self.seat_session_ids[subscriber.seat_id] = self._uuid_source()
                     self._seat_subscription_ids[subscriber.seat_id] = subscriber.subscription_id
                 self.subscribers[subscriber.subscription_id] = subscriber
                 if event.initial:
@@ -1123,7 +1133,7 @@ class RoomActor:
     ) -> None:
         self.dm_transport_trace.append(
             DMTraceRecord(
-                trace_id=uuid4(),
+                trace_id=self._uuid_source(),
                 intent_id=intent.intent_id,
                 template_variant_id=intent.template_variant_id,
                 catalog_version=intent.catalog_version,
@@ -1245,12 +1255,18 @@ class RoomRegistry:
         *,
         max_rooms: int = 256,
         max_connections: int = 1024,
+        uuid_source: UuidSource = uuid4,
     ) -> None:
         if max_rooms <= 0 or max_connections <= 0:
             raise ValueError("ROOM_LIMIT_INVALID")
         self.clock = clock
-        self.tokens = TokenService(token_source, clock)
+        self.tokens = TokenService(
+            token_source,
+            clock,
+            uuid_source=uuid_source,
+        )
         self.seed_source = seed_source
+        self._uuid_source = uuid_source
         self.max_rooms = max_rooms
         self.max_connections = max_connections
         self.rooms: dict[str, RoomActor] = {}
@@ -1338,7 +1354,7 @@ class RoomRegistry:
     def create_room(self, ttl: timedelta) -> CreatedRoom:
         if len(self.rooms) >= self.max_rooms:
             raise ValueError("ROOM_LIMIT_REACHED")
-        room_id = uuid4()
+        room_id = self._uuid_source()
         for _ in range(100):
             try:
                 room_code = self.tokens.source.room_code()
@@ -1356,6 +1372,7 @@ class RoomRegistry:
             clock=self.clock,
             expires_at=expires_at,
             last_activity_at=self.clock(),
+            uuid_source=self._uuid_source,
         )
         self.rooms[room_code] = actor
         return CreatedRoom(

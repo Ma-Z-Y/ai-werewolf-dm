@@ -98,6 +98,14 @@ def test_template_audience_requires_consistent_public_or_seat_shape() -> None:
         TemplateAudience(seat_id=2, session_id=None)
     with pytest.raises(ValidationError):
         TemplateAudience(seat_id=None, session_id=SESSION_ID)
+    with pytest.raises(ValidationError):
+        TemplateAudience(seat_id=None, session_id="abc")
+    with pytest.raises(ValidationError):
+        TemplateAudience(seat_id=1, session_id="")
+    with pytest.raises(ValidationError):
+        TemplateAudience(seat_id=0, session_id="abc")
+    with pytest.raises(ValidationError):
+        TemplateAudience(seat_id=7, session_id="abc")
 
 
 def test_template_intent_seat_channel_binds_exactly_one_current_session() -> None:

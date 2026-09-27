@@ -1,11 +1,11 @@
 import os
+import socket
 from datetime import UTC, datetime, timedelta
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 import uvicorn
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
-from werewolf_dm.application import rooms as rooms_module
 from werewolf_dm.application.dm_contracts import (
     DMTemplateMessage,
     TemplateAudience,
@@ -16,6 +16,26 @@ from werewolf_dm.application.rooms import (
     TokenService,
 )
 from werewolf_dm.interfaces.http_ws.app import create_app
+
+
+_original_socket_connect = socket.socket.connect
+_network_violations: list[str] = []
+
+
+def _guard_outbound_connection(
+    sock: socket.socket,
+    address: object,
+) -> object:
+    host = ""
+    if isinstance(address, tuple) and address:
+        host = str(address[0])
+    if host not in {"127.0.0.1", "::1", "localhost"}:
+        _network_violations.append(f"{host}:{address!r}")
+        raise OSError("E2E_EXTERNAL_NETWORK_BLOCKED")
+    return _original_socket_connect(sock, address)
+
+
+socket.socket.connect = _guard_outbound_connection
 
 
 class TestClock:
@@ -76,11 +96,11 @@ source = ResettableTokenSource(
     room_codes=tuple(f"ROOM{index:02d}" for index in range(10)),
 )
 deterministic_uuid = DeterministicUuidSource()
-rooms_module.uuid4 = deterministic_uuid
 registry = RoomRegistry(
     clock=clock,
     token_source=source,
     seed_source=lambda: 1001,
+    uuid_source=deterministic_uuid,
 )
 
 
@@ -105,8 +125,12 @@ def build_test_control_router(
         test_clock.set(datetime(2099, 1, 1, tzinfo=UTC))
         source.reset()
         deterministic_uuid.reset()
-        rooms_module.uuid4 = deterministic_uuid
-        room_registry.tokens = TokenService(source, test_clock)
+        _network_violations.clear()
+        room_registry.tokens = TokenService(
+            source,
+            test_clock,
+            uuid_source=deterministic_uuid,
+        )
         room_registry.active_connections = 0
         room_registry.auth_failures = 0
         room_registry.slow_connection_closes = 0
@@ -119,6 +143,12 @@ def build_test_control_router(
             raise HTTPException(status_code=401, detail="UNAUTHORIZED")
         await reset_registry()
         return {"status": "ok"}
+
+    @router.get("/__test__/network-state")
+    async def network_state(request: Request) -> dict[str, list[str]]:
+        if request.headers.get("X-Test-Control") != expected_control_token:
+            raise HTTPException(status_code=401, detail="UNAUTHORIZED")
+        return {"violations": list(_network_violations)}
 
     @router.post("/__test__/rooms/{room_code}/advance")
     async def advance_room(

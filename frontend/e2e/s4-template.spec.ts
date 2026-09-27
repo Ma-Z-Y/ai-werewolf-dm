@@ -287,6 +287,17 @@ async function resetDeterministicE2EState(
   expect(response.ok()).toBe(true);
 }
 
+async function backendNetworkViolations(
+  request: APIRequestContext,
+): Promise<string[]> {
+  const response = await request.get(
+    "http://127.0.0.1:8000/__test__/network-state",
+    { headers: controlHeaders },
+  );
+  expect(response.ok()).toBe(true);
+  return (await response.json() as { violations: string[] }).violations;
+}
+
 async function injectSeatDm(
   request: APIRequestContext,
   roomCode: string,
@@ -655,6 +666,16 @@ test("provider hosts receive zero requests", async ({
   await flow.cleanup();
 });
 
+test("backend process makes no external connection", async ({
+  browser,
+  request,
+}) => {
+  await resetDeterministicE2EState(request);
+  const flow = await completeTemplateOnlyFlow({ browser, request });
+  expect(await backendNetworkViolations(request)).toEqual([]);
+  await flow.cleanup();
+});
+
 test("fixed room seed session and catalog produce deep-equal dm messages", async ({
   browser,
   request,
@@ -665,6 +686,30 @@ test("fixed room seed session and catalog produce deep-equal dm messages", async
   expect(first.dmMessages.length).toBeGreaterThan(0);
   expect(JSON.stringify(second.dmMessages)).toBe(
     JSON.stringify(first.dmMessages),
+  );
+  await second.cleanup();
+});
+
+test("final_text is byte identical across runs", async ({
+  browser,
+  request,
+}) => {
+  const first = await runDeterministicTemplateFlow({ browser, request });
+  await first.cleanup();
+  const second = await runDeterministicTemplateFlow({ browser, request });
+  const finalText = (messages: unknown[]) =>
+    messages.map(
+      (message) =>
+        (
+          message as {
+            message: { text: string };
+          }
+        ).message.text,
+    );
+  const firstText = finalText(first.dmMessages);
+  expect(firstText.length).toBeGreaterThan(0);
+  expect(JSON.stringify(finalText(second.dmMessages))).toBe(
+    JSON.stringify(firstText),
   );
   await second.cleanup();
 });
