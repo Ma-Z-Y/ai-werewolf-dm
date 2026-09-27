@@ -1,6 +1,6 @@
 ---
 spec_id: s4-ai-dm-design
-version: 1.1.2
+version: 1.1.3
 status: frozen
 proposed_at: 2026-09-27
 frozen_at: 2026-09-27
@@ -11,7 +11,7 @@ depends_on:
   - s2-realtime-interface-design@1.2.0
   - s3-frontend-constitution@1.1.0
   - s4-ai-dm-constitution@1.1.0
-  - verification-matrix@1.5.2
+  - verification-matrix@1.5.3
 overrides:
   - target: system-design@1.1.0#4
     scope: S4 dm_trace is clipped to template metadata and no raw diagnostics leave memory.
@@ -25,10 +25,10 @@ overrides:
     scope: S4 active admission is template-only; 2.0s remains the absolute ceiling.
   - target: system-design@1.1.0#12
     scope: S4 host audit exports clipped template trace only.
-supersedes: s4-ai-dm-design@1.1.1
+supersedes: s4-ai-dm-design@1.1.2
 ---
 
-# S4 AI DM 设计 v1.1.2
+# S4 AI DM 设计 v1.1.3
 
 ## 1. 状态与效力
 
@@ -44,6 +44,10 @@ deadline、双序列守恒指标、模板废弃预留字段和更严格的浏览
 v1.1.2 将“纯 SHA-256 digest 查询”修正为结构化
 `TemplateVariantKey` 查询；digest 改为独立纯函数，只用于 trace、
 日志关联和跨实例校验，不参与反向选择。
+v1.1.3 统一 DM transport 序列：`RoomActor.outbox_seq` 是唯一 wire 序列，
+`domain_to_transport` 保存实际 wire 值；非 DM 帧可产生数值间隙，但所有
+值必须唯一、严格递增且不回归。admission 后的投递失败只记录独立
+`transport_failed` trace，不撤销 admission，也不阻塞后续 domain slot。
 
 本文件冻结设计边界，但不授权实现。implementation plan、provider 和任何
 S4 代码仍需明确授权。
@@ -264,6 +268,7 @@ class DMTraceRecord(StrictModel):
         "room_closed",
         "duplicate_slot",
         "admission_timeout",
+        "transport_failed",
     ] | None = None
     elapsed_ms: int
 ```
@@ -453,7 +458,11 @@ class TemplateDMService:
 - `RoomActor.outbox_seq`：客户端 transport 顺序。
 
 RoomActor 维护 `processed_announcement_seq`，按领域 seq 升序消费新增
-slot。不得合并或新增第三套序列。
+slot。每个已接纳 DM message 分配并递增一次 `RoomActor.outbox_seq`。
+`domain_to_transport` 只保存该实际 wire 值，不另建第三套计数器。
+非 DM wire message 可以在两个 DM admission 之间推进同一序列，因此映射
+值的子集允许有数值间隙；domain key 必须唯一，transport value 必须严格
+递增且不回归。
 
 ### 9.2 Admission
 
@@ -469,10 +478,16 @@ slot。不得合并或新增第三套序列。
 超时使用 `admission_timeout`，其他失败使用已有 stale/duplicate reason。
 失败时记录 suppressed trace，不发布消息，也不创建网络调用。
 
+admission 成功后，`dm.message` 通过既有 public/seat subscriber 投递。
+若任一符合 audience 的 subscriber `offer()` 返回 `False`，记录独立的
+`transport_failed` suppressed trace；该失败不回滚 mapping、不撤销已接纳
+消息、不阻塞后续 domain slot，也不改变 room/game state。
+
 ### 9.3 顺序
 
 `game.ended` 不能越过更早未完成 `dm.message`。模板消息在 actor 顺序内
-立即解析并接纳，不等待网络、provider 或外部任务。
+立即解析并接纳，不等待网络、provider 或外部任务。接纳后的 wire 投递
+与 domain admission 分离：投递失败不改变 `game.ended` 的 domain 顺序。
 
 ## 10. 暂停、重连与终局
 
@@ -503,7 +518,7 @@ template_admission_rate = template_admitted / completed
 render_failure_rate = render_failed / completed
 slot_suppressed_rate = slot_suppressed / completed
 domain_transport_ratio = mapped_domain_slots / completed_domain_slots
-max_domain_transport_lag = max(domain_seq - transport_seq)
+max_domain_transport_lag = max(domain_seq - transport_seq, default=0)
 ```
 
 其中：
@@ -512,12 +527,13 @@ max_domain_transport_lag = max(domain_seq - transport_seq)
 - `completed_domain_slots = mapped_domain_slots + render_failed +
   slot_suppressed`；
 - `completed_domain_slots == 0` 时 `domain_transport_ratio = 1.0`；
-- `max_domain_transport_lag` 只在 admitted mapping 上取
-  `max(domain_seq - transport_seq)`；mapping 为空时取 `0`。
+- `max_domain_transport_lag` 只在 admitted mapping 上取，仅保留正值；
+  mapping 为空或全部 transport 值领先时取 `0`。
 
-映射必须满足 domain key 唯一、transport value 从 1 连续增长、两个序列
-单调且不回归，且守恒式必须成立。没有 provider hit/fallback/cold/warm
-指标。
+映射必须满足 domain key 唯一、transport value 等于实际 wire
+`RoomActor.outbox_seq`、按 admission 顺序严格递增且不回归。全局 wire
+序列必须从 1 单调连续增长；非 DM 帧可使映射值子集出现间隙。守恒式必须
+成立。没有 provider hit/fallback/cold/warm 指标。
 
 ### 11.2 Trace 隐私
 
@@ -541,6 +557,7 @@ max_domain_transport_lag = max(domain_seq - transport_seq)
 | stale revision/phase/room | suppressed trace | 否 |
 | duplicate slot | suppressed trace | 否 |
 | now 超过 admission deadline | `admission_timeout` suppressed trace | 否 |
+| 已接纳消息投递失败 | `transport_failed` suppressed transport trace | 否（其它匹配 subscriber 仍可收到） |
 | 正常模板解析 | resolved message | 是 |
 
 不得自动创建网络请求作为任何失败的处理。
@@ -590,8 +607,9 @@ provider schema/refusal/truncation 和 raw prompt/output 测试全部 deferred�
 
 四路独立复核：
 
-1. **State/Outbox:** `game.ended` 顺序、domain seq 单调、transport seq
-   连续、无重复、mapping 守恒；
+1. **State/Outbox:** `game.ended` 顺序、domain seq 单调、全局 wire
+   transport seq 连续且无重复、mapping 子集严格递增且守恒；非 DM 帧
+   造成的映射数值间隙合法；
 2. **Information Isolation:** public 无 seat facts、seat 只读自己、
    player replay 无 `dm_trace`、host audit 仅 clipped trace、玩家声称
    不进入 facts；
@@ -629,6 +647,16 @@ provider schema/refusal/truncation 和 raw prompt/output 测试全部 deferred�
 降低门禁必须提升产品规格版本并获得用户确认。
 
 ## 16. 变更历史
+
+### v1.1.3 - 2026-09-27
+
+- 统一 `client_outbox_seq` 与 wire `RoomActor.outbox_seq`，删除私有
+  transport 计数器语义。
+- 规定 `domain_to_transport` 保存实际 wire 值，允许非 DM 帧造成数值
+  间隙但禁止回归或重复。
+- 增加 `transport_failed` 投递失败 trace，区分 delivery failure 与
+  admission suppression；投递失败不回滚 domain/mapping。
+- 增加独立 `S4-04A` transport 交接任务与永久回归要求。
 
 ### v1.1.2 - 2026-09-27
 
