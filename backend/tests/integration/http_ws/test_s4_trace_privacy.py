@@ -182,12 +182,34 @@ def test_metrics_exposes_template_counters_rates_lag_and_ratio() -> None:
         "admission_ms_p95": 11.0,
         "domain_transport_ratio": 0.5,
         "max_domain_transport_lag": 0,
+        "consistent": True,
     }
     assert (
         metrics["dm_template"]
         .keys()
         .isdisjoint({"provider", "model", "cold", "warm", "raw_output"})
     )
+
+
+def test_metrics_endpoint_flags_inconsistent_state() -> None:
+    with _privacy_client() as (client, actor):
+        actor.dm_transport_trace.append(
+            _trace(
+                intent_id=uuid4(),
+                admission_status="suppressed",
+                suppress_reason="transport_failed",
+                elapsed_ms=17,
+            )
+        )
+        response = client.get("/metrics")
+
+    assert response.status_code == 200
+    template = response.json()["dm_template"]
+    assert template["eligible"] == 3
+    assert (
+        template["template_admitted"] + template["render_failed"] + template["slot_suppressed"] == 2
+    )
+    assert template["consistent"] is False
 
 
 def test_audit_include_dm_trace_is_documented_in_openapi() -> None:

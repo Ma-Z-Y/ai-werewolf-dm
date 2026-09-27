@@ -10,6 +10,7 @@ from uuid import UUID
 from pydantic import (
     Field,
     JsonValue,
+    ValidationInfo,
     field_serializer,
     field_validator,
     model_validator,
@@ -18,6 +19,9 @@ from pydantic import (
 from werewolf_dm.application.dm_contracts import DMTraceRecord
 from werewolf_dm.domain.model import StrictModel
 
+# Pydantic's model_construct() is an internal validation-bypassing API and is
+# not part of the metrics trust boundary. Application code must use normal
+# construction, validation, copy, or serialization APIs.
 _TRACE_FIELDS = frozenset(
     {
         "trace_id",
@@ -127,12 +131,23 @@ class _DMMetricBase(StrictModel):
     slot_suppressed: int = Field(default=0, ge=0)
     admission_ms: tuple[int, ...] = ()
 
+    @field_validator("admission_ms", mode="before")
+    @classmethod
+    def parse_admission_ms(cls, value: object, info: ValidationInfo) -> object:
+        if info.mode == "json" and type(value) is list:
+            return tuple(value)
+        return value
+
     @field_validator("admission_ms")
     @classmethod
     def validate_admission_ms(cls, value: tuple[int, ...]) -> tuple[int, ...]:
         if any(elapsed_ms < 0 for elapsed_ms in value):
             raise ValueError("admission_ms entries must be non-negative")
         return value
+
+    @property
+    def consistent(self) -> bool:
+        return self.eligible == self.completed
 
     @property
     def completed(self) -> int:
@@ -177,6 +192,19 @@ class DMMetrics(_DMMetricBase):
     @classmethod
     def freeze_domain_transport(cls, value: Mapping[int, int]) -> Mapping[int, int]:
         return validate_domain_transport_mapping(value.items())
+
+    @field_validator("domain_to_transport", mode="before")
+    @classmethod
+    def parse_json_domain_transport(
+        cls,
+        value: object,
+        info: ValidationInfo,
+    ) -> object:
+        if info.mode != "json" or not isinstance(value, Mapping):
+            return value
+        if all(type(key) is str and key.isdecimal() and str(int(key)) == key for key in value):
+            return {int(key): item for key, item in value.items()}
+        return value
 
     @field_serializer("domain_to_transport", when_used="always")
     def serialize_domain_transport(self, value: Mapping[int, int]) -> dict[int, int]:
@@ -257,6 +285,10 @@ class DMAggregateMetrics(StrictModel):
     @property
     def completed(self) -> int:
         return self.template_admitted + self.render_failed + self.slot_suppressed
+
+    @property
+    def consistent(self) -> bool:
+        return self.eligible == self.completed
 
     @property
     def template_admission_rate(self) -> float:

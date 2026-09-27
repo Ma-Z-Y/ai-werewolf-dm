@@ -48,6 +48,12 @@ class DMTemplateMetricsPayload(StrictModel):
     max_domain_transport_lag: int = Field(
         description="Maximum positive domain_seq minus transport_seq lag."
     )
+    consistent: bool = Field(
+        description=(
+            "True when eligible equals completed admission terminals; "
+            "transport failures are reported separately."
+        )
+    )
 
     @classmethod
     def from_metrics(
@@ -65,6 +71,7 @@ class DMTemplateMetricsPayload(StrictModel):
             admission_ms_p95=metrics.admission_ms_p95,
             domain_transport_ratio=metrics.domain_transport_ratio,
             max_domain_transport_lag=metrics.max_domain_transport_lag,
+            consistent=metrics.consistent,
         )
 
 

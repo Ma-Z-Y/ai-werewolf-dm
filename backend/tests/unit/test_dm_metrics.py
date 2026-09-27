@@ -151,6 +151,31 @@ def test_metrics_mapping_supports_copy_revalidate_and_json_serialization() -> No
     }
 
 
+def test_dm_metrics_serialization_round_trip_preserves_invariants() -> None:
+    metrics = DMMetrics(
+        eligible=2,
+        template_admitted=1,
+        render_failed=1,
+        admission_ms=(3, 5),
+        domain_to_transport={1: 1},
+    )
+
+    restored = DMMetrics.model_validate_json(metrics.model_dump_json())
+
+    assert restored == metrics
+    assert restored.consistent is True
+    assert restored.completed == restored.eligible
+    assert restored.domain_transport_ratio == 0.5
+
+
+def test_dm_metrics_json_normalization_does_not_relax_python_validation() -> None:
+    with pytest.raises(ValidationError):
+        DMMetrics(admission_ms=[1])
+
+    with pytest.raises(ValidationError):
+        DMMetrics.model_validate({"domain_to_transport": {"1": 1}})
+
+
 def test_transport_failed_is_distinct_from_slot_suppressed() -> None:
     intent_id = uuid4()
     admitted = _trace(intent_id=intent_id, elapsed_ms=4)
@@ -173,6 +198,36 @@ def test_transport_failed_is_distinct_from_slot_suppressed() -> None:
     assert metrics.slot_suppressed == 0
     assert metrics.completed == 1
     assert metrics.admission_ms == (4,)
+
+
+def test_transport_failed_and_slot_suppressed_are_mutually_exclusive() -> None:
+    admitted_intent = uuid4()
+    suppressed_intent = uuid4()
+    transport_failed = _trace(
+        intent_id=admitted_intent,
+        admission_status="suppressed",
+        suppress_reason="transport_failed",
+    )
+    admission_suppressed = _trace(
+        intent_id=suppressed_intent,
+        admission_status="suppressed",
+        suppress_reason="admission_timeout",
+    )
+
+    metrics = build_room_dm_metrics(
+        (
+            _trace(intent_id=admitted_intent),
+            transport_failed,
+            admission_suppressed,
+        ),
+        (transport_failed,),
+        {1: 1},
+    )
+
+    assert metrics.template_admitted == 1
+    assert metrics.slot_suppressed == 1
+    assert metrics.completed == 2
+    assert metrics.consistent is True
 
 
 def test_dm_metrics_nested_values_are_immutable() -> None:
