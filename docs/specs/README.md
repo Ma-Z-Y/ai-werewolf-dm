@@ -37,9 +37,9 @@ S1、S2、S3 历史基线由 v1.3 提供；v1.4 新增 LLM 路径候选规格；
     验收原则。
 
 Template-only implementation plan 已存在并完成重基线；`S4-01` 至
-`S4-04A` 已获用户验收。Next Step 是从 `codex/s4-04a-transport@91baa90`
-另开授权会话执行 `S4-05 Template Metrics and Trace Privacy`；`S4-06`
-仍不得提前开始。
+`S4-04A` 已获用户验收。Next Step 是从 `codex/s4-04a-transport` 最新
+交接 tip 另开授权会话执行 `S4-05 Template Metrics and Trace Privacy`；
+`S4-06` 仍不得提前开始。
 
 ## S3
 
