@@ -39,6 +39,7 @@ SuppressReason = Literal[
     "room_closed",
     "duplicate_slot",
     "admission_timeout",
+    "transport_failed",
 ]
 
 ACTIVE_TEMPLATE_CATEGORIES = frozenset(
@@ -89,6 +90,7 @@ class DMTemplateRejectReason(StrEnum):
     ROOM_CLOSED = "room_closed"
     DUPLICATE_SLOT = "duplicate_slot"
     ADMISSION_TIMEOUT = "admission_timeout"
+    TRANSPORT_FAILED = "transport_failed"
 
 
 class TemplateAudience(StrictModel):

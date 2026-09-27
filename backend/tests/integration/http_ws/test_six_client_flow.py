@@ -165,7 +165,27 @@ def receive_json(socket_: ClientConnection) -> dict[str, Any]:
 
 
 def receive_type(socket_: ClientConnection, expected_type: str) -> dict[str, Any]:
-    message = receive_json(socket_)
+    while True:
+        message = receive_json(socket_)
+        if expected_type != "dm.message" and message.get("type") == "dm.message":
+            payload = message.get("message")
+            if (
+                set(message) != {"type", "server_time", "outbox_seq", "message"}
+                or not isinstance(payload, dict)
+                or set(payload)
+                != {
+                    "message_id",
+                    "room_id",
+                    "revision",
+                    "channel",
+                    "audience_bindings",
+                    "text",
+                    "source",
+                }
+            ):
+                raise AssertionError(f"malformed dm.message: {message!r}")
+            continue
+        break
     if message.get("type") != expected_type:
         raise AssertionError(f"expected {expected_type}, got {message!r}")
     return message

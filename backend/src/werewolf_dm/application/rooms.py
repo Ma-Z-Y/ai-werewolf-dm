@@ -192,13 +192,26 @@ class HostControlUpdate(StrictModel):
     host_control: HostControlView
 
 
+class DMTemplateMessageUpdate(StrictModel):
+    type: Literal["dm.message"] = "dm.message"
+    server_time: datetime
+    outbox_seq: int
+    message: DMTemplateMessage
+
+
 class SessionReadyUpdate(StrictModel):
     type: Literal["session.ready"] = "session.ready"
     server_time: datetime
     snapshot: RoomSnapshot
 
 
-RoomUpdate = SessionReadyUpdate | PublicViewUpdate | SeatViewUpdate | HostControlUpdate
+RoomUpdate = (
+    SessionReadyUpdate
+    | PublicViewUpdate
+    | SeatViewUpdate
+    | HostControlUpdate
+    | DMTemplateMessageUpdate
+)
 
 
 class RoomSubscriber(Protocol):
@@ -433,6 +446,7 @@ class RoomActor:
         self.published_messages: list[DMTemplateMessage] = []
         self.published_kinds: list[str] = []
         self.dm_trace: list[DMTraceRecord] = []
+        self.dm_transport_trace: list[DMTraceRecord] = []
         self.last_trace: DMTraceRecord | None = None
         self.seat_session_ids: dict[int, UUID] = {}
         self.closed = False
@@ -455,7 +469,7 @@ class RoomActor:
 
     @property
     def client_outbox_seq(self) -> int:
-        return len(self.domain_to_transport)
+        return self.outbox_seq
 
     def monotonic_now_ms(self) -> int:
         if self._fixed_monotonic_ms is not None:
@@ -583,7 +597,8 @@ class RoomActor:
             self._complete_suppressed(slot, candidate_intent, "stale_phase", now_ms)
             return self._suppressed_result(slot.domain_seq)
 
-        transport_seq = self.client_outbox_seq + 1
+        transport_seq = self.outbox_seq + 1
+        self.outbox_seq = transport_seq
         self.domain_to_transport[slot.domain_seq] = transport_seq
         self._completed_domain_seqs.add(slot.domain_seq)
         self.processed_announcement_seq = max(
@@ -610,6 +625,13 @@ class RoomActor:
             admission_status="admitted",
             suppress_reason=None,
             elapsed_ms=max(0, now_ms - slot.trigger_at_monotonic_ms),
+        )
+        self._publish_dm_message(
+            message,
+            transport_seq=transport_seq,
+            slot=slot,
+            intent=candidate_intent,
+            now_ms=now_ms,
         )
         return DMAdmissionResult(
             domain_seq=slot.domain_seq,
@@ -1040,6 +1062,79 @@ class RoomActor:
         subscriber: RoomSubscriber,
     ) -> tuple[ActorType, int | None, UUID | None]:
         return subscriber.actor_type, subscriber.seat_id, subscriber.session_id
+
+    def _publish_dm_message(
+        self,
+        message: DMTemplateMessage,
+        *,
+        transport_seq: int,
+        slot: DMAnnouncementSlot,
+        intent: TemplateIntent,
+        now_ms: int,
+    ) -> None:
+        update = DMTemplateMessageUpdate(
+            server_time=self.clock(),
+            outbox_seq=transport_seq,
+            message=message,
+        )
+        delivery_failed = False
+        for subscriber in tuple(self.subscribers.values()):
+            if not self._dm_message_targets_subscriber(message, subscriber):
+                continue
+            if not subscriber.offer(update):
+                delivery_failed = True
+        if delivery_failed:
+            self._record_transport_failure(
+                slot,
+                intent,
+                elapsed_ms=max(0, now_ms - slot.trigger_at_monotonic_ms),
+            )
+
+    def _dm_message_targets_subscriber(
+        self,
+        message: DMTemplateMessage,
+        subscriber: RoomSubscriber,
+    ) -> bool:
+        if subscriber.actor_type == "display" and subscriber.session_id != self.display_session_id:
+            self.subscribers.pop(subscriber.subscription_id, None)
+            subscriber.request_close(4001)
+            return False
+        if message.channel == "public":
+            return "public" in subscriber.channels
+        binding = message.audience_bindings[0]
+        seat_id = binding.seat_id
+        session_id = binding.session_id
+        return (
+            seat_id is not None
+            and session_id is not None
+            and subscriber.actor_type == "seat"
+            and subscriber.seat_id == seat_id
+            and "seat" in subscriber.channels
+            and self.seat_session_ids.get(seat_id) == session_id
+            and self._seat_subscription_ids.get(seat_id) == subscriber.subscription_id
+        )
+
+    def _record_transport_failure(
+        self,
+        slot: DMAnnouncementSlot,
+        intent: TemplateIntent,
+        *,
+        elapsed_ms: int,
+    ) -> None:
+        self.dm_transport_trace.append(
+            DMTraceRecord(
+                trace_id=uuid4(),
+                intent_id=intent.intent_id,
+                template_variant_id=intent.template_variant_id,
+                catalog_version=intent.catalog_version,
+                source_event_ids=intent.source_event_ids,
+                channel=intent.channel,
+                audience_seat_ids=intent.audience_seat_ids,
+                admission_status="suppressed",
+                suppress_reason="transport_failed",
+                elapsed_ms=elapsed_ms,
+            )
+        )
 
     def _publish_updates(self) -> None:
         self.outbox_seq += 1

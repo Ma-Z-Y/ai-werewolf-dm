@@ -272,6 +272,7 @@ class ConnectionSink:
         if getattr(message, "type", None) == "command.ack":
             self._latency.observe_command_ms(elapsed_ms)
         elif getattr(message, "type", None) in {
+            "dm.message",
             "public.view.updated",
             "seat.view.updated",
             "host.control.updated",
