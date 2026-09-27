@@ -4,6 +4,7 @@ import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { toAppError } from "../../protocol/errors";
 import type {
   CommandPayload,
+  DMMessage,
   LegalAction,
   SeatView,
 } from "../../protocol/models";
@@ -117,6 +118,7 @@ export function PlayerRoute() {
   const [connectionState, setConnectionState] =
     useState<RoomSocketState>("idle");
   const [seatView, setSeatView] = useState<SeatView | null>(null);
+  const [dmMessages, setDmMessages] = useState<DMMessage[]>([]);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [joinPending, setJoinPending] = useState(false);
   const [ready, setReady] = useState(false);
@@ -260,6 +262,7 @@ export function PlayerRoute() {
     setNightPending(false);
     setDayPending(false);
     setSeatView(null);
+    setDmMessages([]);
     seatViewRef.current = null;
     setTakeoverMessage(null);
     setErrorMessage("会话已过期，请重新加入");
@@ -290,6 +293,7 @@ export function PlayerRoute() {
           setNightPending(false);
           setDayPending(false);
           setSeatView(null);
+          setDmMessages([]);
           seatViewRef.current = null;
           setTakeoverMessage(
             "此玩家席已在其他设备接管，请继续使用新设备。",
@@ -324,6 +328,7 @@ export function PlayerRoute() {
           return;
         }
         setSeatView(message.snapshot.seat_view);
+        setDmMessages([]);
         seatViewRef.current = message.snapshot.seat_view;
 
         const joinIntent = joinIntentRef.current;
@@ -384,6 +389,29 @@ export function PlayerRoute() {
             );
             joinCommandIdRef.current = id;
           }
+        }
+        return;
+      }
+
+      if (message.type === "dm.message") {
+        const binding = message.message.audience_bindings[0];
+        if (
+          session !== null &&
+          message.message.room_id === session.roomId &&
+          message.message.channel === "seat" &&
+          binding?.seat_id === session.seatId
+        ) {
+          setDmMessages((current) => {
+            const next = [...current, message];
+            return next.filter(
+              (item, index) =>
+                next.findIndex(
+                  (candidate) =>
+                    candidate.message.message_id ===
+                    item.message.message_id,
+                ) === index,
+            );
+          });
         }
         return;
       }
@@ -638,6 +666,7 @@ export function PlayerRoute() {
     setSession(joinedSession);
     setJoinPending(true);
     setSeatView(null);
+    setDmMessages([]);
     seatViewRef.current = null;
     setReady(false);
     setReadyPending(false);
@@ -761,6 +790,7 @@ export function PlayerRoute() {
         actionConfirmed={roleConfirmed}
         actionPending={confirmPending || nightPending || dayPending}
         connectionState={connectionState}
+        dmMessages={dmMessages}
         errorMessage={errorMessage}
         onAction={handleSeatAction}
         ready={ready}

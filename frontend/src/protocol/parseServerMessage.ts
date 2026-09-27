@@ -1,5 +1,7 @@
 import type {
   CommandType,
+  DMMessage,
+  DMTemplateMessage,
   HostControlView,
   LegalAction,
   PrivateFact,
@@ -68,6 +70,7 @@ export type ServerMessage =
   | SeatViewMessage
   | HostControlMessage
   | CommandAckMessage
+  | DMMessage
   | PongMessage
   | ErrorMessage;
 
@@ -94,8 +97,36 @@ const COMMAND_TYPES = new Set<CommandType>([
   "HOST_RESUME",
 ]);
 
+const DM_ENVELOPE_KEYS = new Set([
+  "type",
+  "server_time",
+  "outbox_seq",
+  "message",
+]);
+const DM_MESSAGE_KEYS = new Set([
+  "message_id",
+  "room_id",
+  "revision",
+  "channel",
+  "audience_bindings",
+  "text",
+  "source",
+]);
+const DM_AUDIENCE_KEYS = new Set(["seat_id", "session_id"]);
+
 function isObject(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasExactKeys(
+  value: JsonObject,
+  expected: ReadonlySet<string>,
+): boolean {
+  const keys = Object.keys(value);
+  return (
+    keys.length === expected.size &&
+    keys.every((key) => expected.has(key))
+  );
 }
 
 function isString(value: unknown): value is string {
@@ -184,6 +215,58 @@ function isPrivateFact(value: unknown): value is PrivateFact {
 
 function isCommandType(value: unknown): value is CommandType {
   return typeof value === "string" && COMMAND_TYPES.has(value as CommandType);
+}
+
+function isDMTemplateAudience(
+  value: unknown,
+): value is DMTemplateMessage["audience_bindings"][number] {
+  return (
+    isObject(value) &&
+    hasExactKeys(value, DM_AUDIENCE_KEYS) &&
+    isInteger(value.seat_id) &&
+    value.seat_id >= 1 &&
+    value.seat_id <= 6 &&
+    isString(value.session_id) &&
+    value.session_id.length > 0
+  );
+}
+
+function isDMTemplateMessage(value: unknown): value is DMTemplateMessage {
+  if (
+    !isObject(value) ||
+    !hasExactKeys(value, DM_MESSAGE_KEYS) ||
+    !isString(value.message_id) ||
+    value.message_id.length === 0 ||
+    !isString(value.room_id) ||
+    value.room_id.length === 0 ||
+    !isInteger(value.revision) ||
+    value.revision < 0 ||
+    (value.channel !== "public" && value.channel !== "seat") ||
+    !isString(value.text) ||
+    value.text.length === 0 ||
+    value.source !== "template" ||
+    !Array.isArray(value.audience_bindings)
+  ) {
+    return false;
+  }
+  if (value.channel === "public") {
+    return value.audience_bindings.length === 0;
+  }
+  return (
+    value.audience_bindings.length === 1 &&
+    isDMTemplateAudience(value.audience_bindings[0])
+  );
+}
+
+function isDMMessage(value: unknown): value is DMMessage {
+  return (
+    isObject(value) &&
+    hasExactKeys(value, DM_ENVELOPE_KEYS) &&
+    value.type === "dm.message" &&
+    isString(value.server_time) &&
+    isInteger(value.outbox_seq) &&
+    isDMTemplateMessage(value.message)
+  );
 }
 
 function isLegalAction(value: unknown): value is LegalAction {
@@ -329,6 +412,11 @@ export function parseServerMessage(value: unknown): ParsedServerMessage {
           error_code: value.error_code,
           outbox_seq: value.outbox_seq,
         });
+      }
+      break;
+    case "dm.message":
+      if (isDMMessage(value)) {
+        return accepted(value);
       }
       break;
     case "pong":

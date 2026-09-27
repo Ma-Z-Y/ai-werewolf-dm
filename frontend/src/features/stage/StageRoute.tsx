@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 
-import type { PublicView } from "../../protocol/models";
+import type { DMMessage, PublicView } from "../../protocol/models";
 import type {
   RoomSocket,
   RoomSocketEvent,
@@ -50,6 +50,7 @@ export function StageRoute() {
   const [connectionState, setConnectionState] =
     useState<RoomSocketState>("idle");
   const [publicView, setPublicView] = useState<PublicView | null>(null);
+  const [dmMessages, setDmMessages] = useState<DMMessage[]>([]);
   const [serverTime, setServerTime] = useState("");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const socketRef = useRef<RoomSocket | null>(null);
@@ -62,6 +63,7 @@ export function StageRoute() {
       clearStoredDisplaySession(expiredSession);
       setSession(null);
       setPublicView(null);
+      setDmMessages([]);
       setServerTime("");
       setErrorMessage(message);
     },
@@ -89,6 +91,7 @@ export function StageRoute() {
           return;
         }
         setPublicView(message.snapshot.public_view);
+        setDmMessages([]);
         setServerTime(message.server_time);
         setErrorMessage(null);
         socketRef.current?.send({
@@ -106,6 +109,27 @@ export function StageRoute() {
           setPublicView(message.public_view);
           setServerTime(message.server_time);
           setErrorMessage(null);
+        }
+        return;
+      }
+
+      if (message.type === "dm.message") {
+        if (
+          session !== null &&
+          message.message.room_id === session.roomId &&
+          message.message.channel === "public"
+        ) {
+          setDmMessages((current) => {
+            const next = [...current, message];
+            return next.filter(
+              (item, index) =>
+                next.findIndex(
+                  (candidate) =>
+                    candidate.message.message_id ===
+                    item.message.message_id,
+                ) === index,
+            );
+          });
         }
         return;
       }
@@ -171,6 +195,7 @@ export function StageRoute() {
   return (
     <StageShell
       connectionState={connectionState}
+      dmMessages={dmMessages}
       errorMessage={errorMessage}
       onRetryConnection={() => roomSocket?.connect(session.token)}
       publicView={publicView}

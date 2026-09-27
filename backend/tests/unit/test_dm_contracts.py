@@ -174,6 +174,15 @@ def test_template_variant_key_is_strict_catalog_versioned_and_immutable() -> Non
         TemplateVariantKey(
             **{**key.model_dump(), "provider": "forbidden"},
         )
+    with pytest.raises(ValidationError):
+        TemplateVariantKey(
+            catalog_version="s4-template-v1",
+            category="SEAT_PROMPT",
+            channel="seat",
+            style="urgent",
+            audience_bindings=(TemplateAudience(),),
+            source_event_id=EVENT_ID,
+        )
 
 
 def test_template_catalog_preserves_reserved_compatibility_fields() -> None:
@@ -229,6 +238,17 @@ def test_render_and_transport_contracts_keep_template_only_shape() -> None:
 
     assert result.source == "template"
     assert "provider" not in result.model_dump()
+    with pytest.raises(ValidationError):
+        TemplateRenderResult(
+            intent_id=intent.intent_id,
+            template_variant_id="s4-seat-prompt-urgent-v1",
+            catalog_version=request.catalog_version,
+            final_text="请 2 号玩家行动。",
+            source_event_ids=(EVENT_ID,),
+            unused_fact_ids=(),
+            channel="seat",
+            audience_bindings=(TemplateAudience(),),
+        )
 
 
 def test_transport_message_requires_one_seat_binding() -> None:
@@ -257,6 +277,16 @@ def test_transport_message_requires_one_seat_binding() -> None:
                     ),
                 )
             }
+        )
+    with pytest.raises(ValidationError):
+        DMTemplateMessage(
+            message_id=uuid4(),
+            room_id=ROOM_ID,
+            revision=3,
+            channel="seat",
+            audience_bindings=(TemplateAudience(),),
+            text="请行动。",
+            source="template",
         )
 
 

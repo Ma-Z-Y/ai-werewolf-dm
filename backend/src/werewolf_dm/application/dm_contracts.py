@@ -128,8 +128,12 @@ class TemplateVariantKey(StrictModel):
             raise ValueError("audience bindings must be unique")
         if self.channel == "public" and bindings:
             raise ValueError("public variant key requires zero audience bindings")
-        if self.channel == "seat" and len(bindings) != 1:
-            raise ValueError("seat variant key requires exactly one audience binding")
+        if self.channel == "seat" and (
+            len(bindings) != 1 or bindings[0].seat_id is None or bindings[0].session_id is None
+        ):
+            raise ValueError(
+                "seat variant key requires one bound seat and session",
+            )
         object.__setattr__(self, "audience_bindings", bindings)
         return self
 
@@ -313,8 +317,12 @@ class TemplateRenderResult(StrictModel):
         )
         if self.channel == "public" and bindings:
             raise ValueError("public result cannot carry seat audience")
-        if self.channel == "seat" and len(bindings) != 1:
-            raise ValueError("seat result requires exactly one audience binding")
+        if self.channel == "seat" and (
+            len(bindings) != 1 or bindings[0].seat_id is None or bindings[0].session_id is None
+        ):
+            raise ValueError(
+                "seat result requires one bound seat and session",
+            )
         object.__setattr__(self, "source_event_ids", tuple(source_event_ids))
         object.__setattr__(self, "unused_fact_ids", tuple(unused_fact_ids))
         object.__setattr__(self, "audience_bindings", tuple(bindings))
@@ -342,8 +350,12 @@ class DMTemplateMessage(StrictModel):
         )
         if self.channel == "public" and bindings:
             raise ValueError("public message cannot carry seat audience")
-        if self.channel == "seat" and len(bindings) != 1:
-            raise ValueError("seat message requires exactly one audience binding")
+        if self.channel == "seat" and (
+            len(bindings) != 1 or bindings[0].seat_id is None or bindings[0].session_id is None
+        ):
+            raise ValueError(
+                "seat message requires one bound seat and session",
+            )
         object.__setattr__(self, "audience_bindings", tuple(bindings))
         return self
 
