@@ -1,10 +1,10 @@
 ---
 spec_id: verification-matrix
-version: 1.5.0
+version: 1.5.1
 status: frozen
 proposed_at: 2026-09-27
 frozen_at: 2026-09-27
-supersedes: verification-matrix@1.4.0
+supersedes: verification-matrix@1.5.0
 owner: quality
 depends_on:
   - product-constitution@1.1.0
@@ -13,7 +13,7 @@ depends_on:
   - s3-frontend-constitution@1.1.0
 ---
 
-# AI 狼人杀 DM 验证矩阵 v1.5
+# AI 狼人杀 DM 验证矩阵 v1.5.1
 
 ## 1. 测试原则
 
@@ -348,7 +348,7 @@ Codex 环境下使用项目脚本和交付前检查等价实现，不依赖 Clau
 
 ## 14. S4 AI DM Template-Only Verification
 
-本节是 `v1.5.0` 冻结的 template-only 验证增量。状态只允许：
+本节是 `v1.5.1` 冻结的 template-only 验证增量。状态只允许：
 
 - `completed`：证据已固定，不表示门禁通过；
 - `template-only`：当前 S4 必须实现和验收；
@@ -362,25 +362,27 @@ Codex 环境下使用项目脚本和交付前检查等价实现，不依赖 Clau
 | `S4-P0-001` | completed | provider spike 已执行；两个候选失败，`selected_provider=none` |
 | `S4-P0-002` | completed | 已冻结 template-only、未来 1.5s/1.6s/2.0s/50% 重入门禁和失败证据 |
 | `S4-OFF-001` | template-only | 所有 active intent 均为 template，零 provider job、零网络、零凭据、零 `llm_eligible` |
-| `S4-TEMPLATE-001` | template-only | catalog 覆盖完整；variant key 确定；相同输入产生相同字节和 source-event 映射 |
+| `S4-TEMPLATE-001` | template-only | catalog 覆盖完整；SHA-256 canonical variant key 确定且 audience 顺序无关；相同输入产生相同字节和 source-event 映射 |
 | `S4-DM-025` | template-only | `final_text` 精确等于服务端渲染结果，且只出现一次 |
 | `S4-DM-026` | template-only | confusable、零宽、双向控制、全半角和中文数字不能绕过 catalog/renderer |
 | `S4-DM-027` | template-only | 玩家声称不进入 facts 或最终文本；原始 SPEAK ID/文本被拒绝 |
-| `S4-DM-028` | template-only | 每个 eligible slot 记录 admitted/render_failed/suppressed 终态和 admission latency |
-| `S4-DM-029` | template-only | 缺模板、非法 catalog、未授权事实、stale admission 必须 Red-first fail closed |
+| `S4-DM-028` | template-only | 每个 eligible slot 记录 admitted/render_failed/suppressed 终态、admission latency 和双序列守恒 |
+| `S4-DM-029` | template-only | 缺模板、非法 catalog、未授权事实、`NO_FACTS_USED`、stale/timeout admission 必须 Red-first fail closed |
 | `S4-DM-030` | template-only | 隐藏角色、狼队、药水、查验和未公开死因不得通过 catalog 或 renderer 泄漏 |
 | `S4-DM-031` | template-only | 当前输出没有 `claimed_refs`；claimed statement 不得被改写为事实 |
 | `S4-DM-032` | template-only | provider 硬关闭时，任何 intent/channel 都不能产生 `llm_eligible` |
 | `S4-TRACE-001` | template-only | host audit 只导出 clipped template trace；player replay 不导出 `dm_trace` |
 | `S4-HOST-001` | template-only | 不构造 host template context；任何 host/seat provider 扩展只能 deferred |
-| `S4-LAT-001` | template-only | `dm.message` admission 终点是 RoomActor 发布队列接纳，绝对上限 `2.0s` |
+| `S4-LAT-001` | template-only | slot 带 `trigger_at_monotonic_ms` 与 `trigger+2000ms` deadline；`now == deadline` 可接纳，`now > deadline` fail closed 并记录 `admission_timeout` |
 | `S4-REC-001` | template-only | pause/revision/phase/room/session/slot 变化后旧模板消息不得发布或重复发布 |
 | `S4-OUT-001` | template-only | RoomActor 按领域 seq 升序 admission；`game.ended` 不得越过更早 `dm.message` |
 | `S4-OUT-002` | template-only | 领域 announcement seq 与客户端 `outbox_seq` 分离且可映射 |
-| `S4-MET-001` | template-only | 模板终态互斥、分母守恒；无 provider hit/fallback/cold/warm 指标 |
-| `S4-ACC-001` | template-only | 状态/outbox、信息隔离、模板失败关闭、确定性/延迟四路 fresh-context 均通过 |
+| `S4-MET-001` | template-only | 模板终态互斥、domain/transport mapping 守恒；记录 max lag/ratio；无 provider 指标 |
+| `S4-ACC-001` | template-only | 四路使用明确检查清单；覆盖 provider 域名请求为 0、固定 seed 两次 `dmMessages` deep equal |
 
 `LAT-001/004/005` 虽有 S2 基础证据，仍必须在真实 S4 模板路径重跑。
+`S4-TEMPLATE-001` 还要求 `TemplateRenderResult.unused_fact_ids` 排序且
+无重复；传入非空 facts 但均未使用时以 `NO_FACTS_USED` 失败关闭。
 
 ### 14.2 Deferred Provider Verification
 
@@ -438,6 +440,15 @@ Deferred rows 不得计入当前 S4 完成率，也不得用 P0-01a/b 结果替�
 降低门禁属于产品决策，不能由实现者自行修改。
 
 ## 15. Changelog
+
+### v1.5.1 - 2026-09-27
+
+- 增加 canonical SHA-256 variant key 和 audience 顺序无关断言。
+- 增加 `unused_fact_ids` 与 `NO_FACTS_USED` 失败关闭。
+- 增加 slot trigger/deadline 与 `admission_timeout`。
+- 增加 domain/transport max lag、ratio 和映射守恒。
+- 增加 provider 域名请求为零及固定 seed 字节级 `dmMessages` E2E。
+- 明确四路独立复核清单。
 
 ### v1.5.0 - 2026-09-27
 

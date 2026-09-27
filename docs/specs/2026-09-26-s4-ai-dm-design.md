@@ -1,6 +1,6 @@
 ---
 spec_id: s4-ai-dm-design
-version: 1.1.0
+version: 1.1.1
 status: frozen
 proposed_at: 2026-09-27
 frozen_at: 2026-09-27
@@ -11,7 +11,7 @@ depends_on:
   - s2-realtime-interface-design@1.2.0
   - s3-frontend-constitution@1.1.0
   - s4-ai-dm-constitution@1.1.0
-  - verification-matrix@1.5.0
+  - verification-matrix@1.5.1
 overrides:
   - target: system-design@1.1.0#4
     scope: S4 dm_trace is clipped to template metadata and no raw diagnostics leave memory.
@@ -25,10 +25,10 @@ overrides:
     scope: S4 active admission is template-only; 2.0s remains the absolute ceiling.
   - target: system-design@1.1.0#12
     scope: S4 host audit exports clipped template trace only.
-supersedes: s4-ai-dm-design@1.0.0
+supersedes: s4-ai-dm-design@1.1.0
 ---
 
-# S4 AI DM 设计 v1.1
+# S4 AI DM 设计 v1.1.1
 
 ## 1. 状态与效力
 
@@ -38,6 +38,10 @@ supersedes: s4-ai-dm-design@1.0.0
 v1.0.0 的 provider、LLM、ContextBuilder、OutputGate、真实 provider
 性能和 cold/warm 指标条款已 deferred。它们可以保留在本文末的“未来
 provider 重新进入附录”中，但不能定义当前 schema、测试、指标或完成条件。
+
+v1.1.1 增加 canonical variant key、unused-fact 检测、admission 绝对
+deadline、双序列守恒指标、模板废弃预留字段和更严格的浏览器验收；
+不改变 active template-only 边界。
 
 本文件冻结设计边界，但不授权实现。implementation plan、provider 和任何
 S4 代码仍需明确授权。
@@ -165,15 +169,22 @@ class TemplateVariant(StrictModel):
     template_text: str
     allowed_fact_kinds: frozenset[str]
     placeholders: frozenset[str]
+    deprecated_at_version: str | None = None
 
 
 class TemplateCatalog(StrictModel):
     catalog_version: str
     variants: dict[str, TemplateVariant]
+    reserved_variant_ids: frozenset[str] = frozenset()
 ```
 
 所有模板文本在代码中静态定义。Catalog 校验必须拒绝重复 ID、未知
 placeholder、未声明 fact kind、同形字/confusable、零宽字符和双向控制字符。
+
+`deprecated_at_version` 和 `reserved_variant_ids` 是 v1.1.1 的未来兼容
+预留字段。当前 S4 只要求模型接受并序列化这两个字段，不启用任何
+reserved ID 校验、deprecated 回放或新 variant 选择行为；这些语义必须由
+未来独立版本化任务定义。
 
 ### 4.5 TemplateRenderRequest 与 TemplateRenderResult
 
@@ -190,13 +201,16 @@ class TemplateRenderResult(StrictModel):
     catalog_version: str
     final_text: str
     source_event_ids: list[UUID]
+    unused_fact_ids: list[UUID]
     channel: Literal["public", "seat"]
     audience_bindings: list[TemplateAudience]
     source: Literal["template"] = "template"
 ```
 
-`source_event_ids` 与 facts 一一对应、排序且无重复。`final_text` 只来自
-服务端模板和 allowlisted fact 字段。
+`source_event_ids` 排序且无重复。`unused_fact_ids` 记录传入但没有被
+variant 使用的所有 fact，同样排序且无重复；若传入非空 facts 且
+`unused_fact_ids == all facts`，渲染必须以 `NO_FACTS_USED` 失败。
+`final_text` 只来自服务端模板和 allowlisted fact 字段。
 
 ### 4.6 DMTemplateMessage
 
@@ -230,12 +244,13 @@ class DMTraceRecord(StrictModel):
         "stale_phase",
         "room_closed",
         "duplicate_slot",
-    ]
+        "admission_timeout",
+    ] | None = None
     elapsed_ms: int
 ```
 
 没有 provider/model/raw output/prompt 字段。`suppress_reason` 只在
-`suppressed` 时非空。
+`suppressed` 时非空；admitted/failed trace 必须使用 `None`。
 
 ### 4.8 Announcement Slot 与 Admission
 
@@ -244,6 +259,8 @@ class DMAnnouncementSlot(StrictModel):
     domain_seq: int
     room_id: UUID
     revision: int
+    trigger_at_monotonic_ms: int
+    admission_deadline_monotonic_ms: int
 
 
 class DMAdmissionResult(StrictModel):
@@ -252,6 +269,11 @@ class DMAdmissionResult(StrictModel):
     admitted: bool
     message: DMTemplateMessage | None
 ```
+
+构造 slot 时必须验证
+`admission_deadline_monotonic_ms == trigger_at_monotonic_ms + 2000`。
+admission 时若 `now > admission_deadline_monotonic_ms`，结果以
+`admission_timeout` fail closed，不发布消息。
 
 ## 5. Intent 路由
 
@@ -280,15 +302,27 @@ facts；任何 intent 都不能产生 `llm_eligible`。
 
 ### 6.2 Variant 选择
 
-Variant key 固定为：
+Variant key 是 canonical JSON 的 lowercase SHA-256 hex digest：
 
-```text
-(category, channel, style, audience_bindings, source_event_id)
+```json
+{
+  "category": "...",
+  "channel": "public|seat",
+  "style": "...",
+  "audience_bindings": [
+    {"seat_id": 1, "session_id": "uuid-string"}
+  ],
+  "source_event_id": "uuid-string"
+}
 ```
 
-`TemplateRegistry.select_by_key(key) -> TemplateVariant` 只接受完整五元组，
-返回 catalog 中唯一的 variant；`template_variant_id` 是输出字段，不参与
-选择键。
+`audience_bindings` 先按 `(seat_id, session_id)` 排序，对象键排序，紧凑
+分隔符编码为 UTF-8 后计算 SHA-256。因此输入列表顺序不影响 key。
+`TemplateRegistry.catalog(catalog_version) -> TemplateCatalog` 返回 frozen
+catalog；`TemplateRegistry.resolve(intent) -> TemplateVariant` 计算 key 后
+选择唯一 variant；`TemplateRegistry.select_by_key(key: str) ->
+TemplateVariant` 只接受这个 digest。`template_variant_id` 是输出字段，
+不参与选择键。
 
 同一 key 必须稳定选择同一 variant。Variant 选择不得读取真实时间、全局
 随机数、环境变量、数据库或 provider。
@@ -319,11 +353,15 @@ variant；测试要检查未知 category、缺失 variant 和重复 ID 失败关
 ```text
 TemplateVariant.template_text
   -> replace only declared placeholders with allowlisted fact fields
+  -> record used_fact_ids
+  -> unused_fact_ids = supplied_fact_ids - used_fact_ids
   -> final_text
 ```
 
 不追加动态前缀或后缀。未替换 placeholder、额外 placeholder、空最终文本
-或 fact 不匹配都抛出 `TemplateRenderError`。
+或 fact 不匹配都抛出 `TemplateRenderError`。传入非空 facts 但
+`used_fact_ids` 为空时抛出 `NO_FACTS_USED`；成功结果必须返回排序后的
+`unused_fact_ids`。
 
 ### 7.3 隐私
 
@@ -371,11 +409,13 @@ slot。不得合并或新增第三套序列。
 接纳前必须原子复检：
 
 1. slot `domain_seq` 未处理；
-2. `slot.revision == state.revision`；
-3. slot 对应的 phase/event 仍是最新；
-4. room 未关闭且未过期；
-5. message audience 仍与当前 session binding 匹配。
+2. `now <= slot.admission_deadline_monotonic_ms`；
+3. `slot.revision == state.revision`；
+4. slot 对应的 phase/event 仍是最新；
+5. room 未关闭且未过期；
+6. message audience 仍与当前 session binding 匹配。
 
+超时使用 `admission_timeout`，其他失败使用已有 stale/duplicate reason。
 失败时记录 suppressed trace，不发布消息，也不创建网络调用。
 
 ### 9.3 顺序
@@ -401,6 +441,8 @@ slot。不得合并或新增第三套序列。
 - `dm_template_render_failed_total`
 - `dm_template_slot_suppressed_total`
 - `dm_template_admission_ms` window
+- `dm_template_max_domain_transport_lag`
+- `dm_template_domain_transport_ratio`
 
 公式：
 
@@ -409,9 +451,22 @@ completed = template_admitted + render_failed + slot_suppressed
 template_admission_rate = template_admitted / completed
 render_failure_rate = render_failed / completed
 slot_suppressed_rate = slot_suppressed / completed
+domain_transport_ratio = mapped_domain_slots / completed_domain_slots
+max_domain_transport_lag = max(domain_seq - transport_seq)
 ```
 
-没有 provider hit/fallback/cold/warm 指标。
+其中：
+
+- `mapped_domain_slots = template_admitted`；
+- `completed_domain_slots = mapped_domain_slots + render_failed +
+  slot_suppressed`；
+- `completed_domain_slots == 0` 时 `domain_transport_ratio = 1.0`；
+- `max_domain_transport_lag` 只在 admitted mapping 上取
+  `max(domain_seq - transport_seq)`；mapping 为空时取 `0`。
+
+映射必须满足 domain key 唯一、transport value 从 1 连续增长、两个序列
+单调且不回归，且守恒式必须成立。没有 provider hit/fallback/cold/warm
+指标。
 
 ### 11.2 Trace 隐私
 
@@ -430,9 +485,11 @@ slot_suppressed_rate = slot_suppressed / completed
 | fact 未授权 | `TemplateRenderError` | 否 |
 | player claim 作为 fact | `TemplateRenderError` | 否 |
 | placeholder 不匹配 | `TemplateRenderError` | 否 |
+| 传入 facts 但均未使用 | `TemplateRenderError(NO_FACTS_USED)` | 否 |
 | Unicode 控制字符 | `TemplateRenderError` | 否 |
 | stale revision/phase/room | suppressed trace | 否 |
 | duplicate slot | suppressed trace | 否 |
+| now 超过 admission deadline | `admission_timeout` suppressed trace | 否 |
 | 正常模板解析 | resolved message | 是 |
 
 不得自动创建网络请求作为任何失败的处理。
@@ -444,7 +501,8 @@ slot_suppressed_rate = slot_suppressed / completed
 - contract strictness；
 - intent 路由完整性；
 - catalog 覆盖、Unicode 和确定性；
-- renderer 事实绑定、claim 隔离和失败关闭；
+- variant key audience 顺序无关、renderer 事实绑定、unused fact、
+  claim 隔离和失败关闭；
 - service 无 I/O、确定性和错误；
 - metrics 终态守恒。
 
@@ -453,6 +511,7 @@ slot_suppressed_rate = slot_suppressed / completed
 - domain/transport 双序列；
 - `game.ended` 顺序；
 - duplicate/stale slot；
+- admission deadline 和 domain/transport 守恒；
 - public/seat/audit/replay 隐私。
 
 ### 13.3 浏览器
@@ -462,6 +521,8 @@ slot_suppressed_rate = slot_suppressed / completed
 - seat 只显示本 seat 授权 DM；
 - 暂停、重连和终局顺序；
 - 无 provider 网络。
+- 相同固定 room/seed 运行两次时 `dmMessages` deep equal；
+- 拦截 provider 域名并断言请求数为 0。
 
 ### 13.4 性能
 
@@ -477,10 +538,16 @@ provider schema/refusal/truncation 和 raw prompt/output 测试全部 deferred�
 
 四路独立复核：
 
-1. state/outbox；
-2. 信息隔离；
-3. template registry/renderer；
-4. determinism/latency/E2E。
+1. **State/Outbox:** `game.ended` 顺序、domain seq 单调、transport seq
+   连续、无重复、mapping 守恒；
+2. **Information Isolation:** public 无 seat facts、seat 只读自己、
+   player replay 无 `dm_trace`、host audit 仅 clipped trace、玩家声称
+   不进入 facts；
+3. **Template Registry/Renderer:** 所有 intent 有 variant、confusable
+   拒绝、未声明 placeholder 拒绝、未授权 fact 拒绝、缺失模板失败关闭、
+   `NO_FACTS_USED` 失败关闭；
+4. **Determinism/Latency/E2E:** 字节级相同、`LAT-001/004/005` 重跑、
+   固定 seed 两次 `dmMessages` deep equal、无 provider 网络请求。
 
 任何 scope 为 BLOCK 时不得冻结实现交付。
 
@@ -510,6 +577,19 @@ provider schema/refusal/truncation 和 raw prompt/output 测试全部 deferred�
 降低门禁必须提升产品规格版本并获得用户确认。
 
 ## 16. 变更历史
+
+### v1.1.1 - 2026-09-27
+
+- 增加 canonical JSON + SHA-256 `template_variant_key`，并规定
+  audience_bindings 顺序无关。
+- 增加 `unused_fact_ids` 与 `NO_FACTS_USED` fail-closed。
+- 增加 `trigger_at_monotonic_ms` /
+  `admission_deadline_monotonic_ms` 和 `admission_timeout`。
+- 增加 domain/transport 守恒指标 `max_domain_transport_lag` 和
+  `domain_transport_ratio`。
+- 增加 provider 域名请求为零和固定 seed 字节级 E2E 断言。
+- 预留 `deprecated_at_version` 与 `reserved_variant_ids`，当前不启用
+  废弃行为。
 
 ### v1.1.0 - 2026-09-27
 
