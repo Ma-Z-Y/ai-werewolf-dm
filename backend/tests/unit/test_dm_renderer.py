@@ -164,6 +164,16 @@ def test_renderer_produces_exact_server_owned_text() -> None:
     assert "raw_output" not in dumped
 
 
+def test_renderer_template_is_byte_identical_for_same_input() -> None:
+    request = _request((_fact(),))
+    catalog = _default_catalog()
+
+    first = render_template(request, catalog)
+    second = render_template(request, catalog)
+
+    assert first.model_dump_json().encode() == second.model_dump_json().encode()
+
+
 def test_renderer_rejects_unauthorized_fact() -> None:
     private_fact = _fact(
         visibility="seat",
@@ -331,6 +341,21 @@ def test_renderer_records_unused_facts() -> None:
     )
 
 
+def test_render_result_used_and_unused_facts_partition_input() -> None:
+    primary = _fact()
+    extra = _fact(fact_id=EXTRA_FACT_ID, fields={"seat_ids": "3", "count": 1})
+    all_fact_ids = {primary.fact_id, extra.fact_id}
+    used_fact_ids = {primary.fact_id}
+
+    result = render_template(
+        _request((extra, primary)),
+        _default_catalog(),
+    )
+
+    assert used_fact_ids.isdisjoint(result.unused_fact_ids)
+    assert used_fact_ids | set(result.unused_fact_ids) == all_fact_ids
+
+
 @pytest.mark.parametrize(
     ("first_seat_ids", "second_seat_ids"),
     [("2", "4"), ("4", "2")],
@@ -377,6 +402,7 @@ def test_renderer_excludes_unused_source_event_ids() -> None:
     result = render_template(_request((_fact(),), intent=intent), _default_catalog())
 
     assert result.source_event_ids == (EVENT_ID,)
+    assert set(result.source_event_ids) <= set(intent.source_event_ids)
 
 
 def test_renderer_allows_own_seat_fact_and_rejects_another_seat() -> None:
