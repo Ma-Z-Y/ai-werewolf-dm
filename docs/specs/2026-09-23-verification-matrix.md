@@ -1,10 +1,10 @@
 ---
 spec_id: verification-matrix
-version: 1.5.1
+version: 1.5.2
 status: frozen
 proposed_at: 2026-09-27
 frozen_at: 2026-09-27
-supersedes: verification-matrix@1.5.0
+supersedes: verification-matrix@1.5.1
 owner: quality
 depends_on:
   - product-constitution@1.1.0
@@ -13,7 +13,7 @@ depends_on:
   - s3-frontend-constitution@1.1.0
 ---
 
-# AI 狼人杀 DM 验证矩阵 v1.5.1
+# AI 狼人杀 DM 验证矩阵 v1.5.2
 
 ## 1. 测试原则
 
@@ -348,7 +348,7 @@ Codex 环境下使用项目脚本和交付前检查等价实现，不依赖 Clau
 
 ## 14. S4 AI DM Template-Only Verification
 
-本节是 `v1.5.1` 冻结的 template-only 验证增量。状态只允许：
+本节是 `v1.5.2` 冻结的 template-only 验证增量。状态只允许：
 
 - `completed`：证据已固定，不表示门禁通过；
 - `template-only`：当前 S4 必须实现和验收；
@@ -362,7 +362,8 @@ Codex 环境下使用项目脚本和交付前检查等价实现，不依赖 Clau
 | `S4-P0-001` | completed | provider spike 已执行；两个候选失败，`selected_provider=none` |
 | `S4-P0-002` | completed | 已冻结 template-only、未来 1.5s/1.6s/2.0s/50% 重入门禁和失败证据 |
 | `S4-OFF-001` | template-only | 所有 active intent 均为 template，零 provider job、零网络、零凭据、零 `llm_eligible` |
-| `S4-TEMPLATE-001` | template-only | catalog 覆盖完整；SHA-256 canonical variant key 确定且 audience 顺序无关；相同输入产生相同字节和 source-event 映射 |
+| `S4-TEMPLATE-001` | template-only | catalog 覆盖完整；结构化 `TemplateVariantKey` 含 catalog version，audience cardinality 合法，确定选择且相同输入产生相同字节和 source-event 映射 |
+| `S4-TEMPLATE-002` | template-only | 两个全新 Registry 对同一 descriptor 返回同一且精确预期的 variant；`template_variant_digest()` 跨实例一致；`select_by_key` 方法不存在 |
 | `S4-DM-025` | template-only | `final_text` 精确等于服务端渲染结果，且只出现一次 |
 | `S4-DM-026` | template-only | confusable、零宽、双向控制、全半角和中文数字不能绕过 catalog/renderer |
 | `S4-DM-027` | template-only | 玩家声称不进入 facts 或最终文本；原始 SPEAK ID/文本被拒绝 |
@@ -415,7 +416,8 @@ Deferred rows 不得计入当前 S4 完成率，也不得用 P0-01a/b 结果替�
 | 验证 ID | owner 任务 | 预期工件 |
 | --- | --- | --- |
 | `S4-OFF-001` | `S4-01`、`S4-03`、`S4-06` | import/network guard、service 测试和 E2E 无 provider 证据 |
-| `S4-TEMPLATE-001` | `S4-01`、`S4-02` | catalog/variant/renderer 测试 |
+| `S4-TEMPLATE-001` | `S4-01`、`S4-02` | catalog、descriptor select、digest、renderer 测试 |
+| `S4-TEMPLATE-002` | `S4-01` | 跨实例 select、same-route/different-event variant、digest 一致性与无 digest-only 查询测试 |
 | `S4-DM-025..032` | `S4-01`、`S4-02`、`S4-03`、`S4-05` | 模板渲染、失败关闭、指标和隐私测试 |
 | `S4-TRACE-001`、`VIS-009` | `S4-05` | audit/replay/log 隐私测试 |
 | `S4-LAT-001`、`LAT-001/004/005` | `S4-04`、`S4-05`、`S4-06` | outbox、浏览器和性能证据 |
@@ -440,6 +442,17 @@ Deferred rows 不得计入当前 S4 完成率，也不得用 P0-01a/b 结果替�
 降低门禁属于产品决策，不能由实现者自行修改。
 
 ## 15. Changelog
+
+### v1.5.2 - 2026-09-27
+
+- 将不可实现的 digest-only variant 查询修订为结构化
+  `TemplateVariantKey` 查询。
+- 将 `catalog_version` 纳入 descriptor 和 digest，并明确 registry
+  catalog map 不可变、选择过程不依赖调用历史。
+- 新增 `S4-TEMPLATE-002`，验证跨实例 variant 选择与 digest 一致性，
+  并要求 digest-only 查询方法不存在。
+- 更新 `S4-TEMPLATE-001` 证据为 descriptor select、audience
+  cardinality、duplicate-route fail closed 和确定性 renderer。
 
 ### v1.5.1 - 2026-09-27
 

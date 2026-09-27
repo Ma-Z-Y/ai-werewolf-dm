@@ -1,6 +1,6 @@
 ---
 spec_id: s4-ai-dm-design
-version: 1.1.1
+version: 1.1.2
 status: frozen
 proposed_at: 2026-09-27
 frozen_at: 2026-09-27
@@ -11,7 +11,7 @@ depends_on:
   - s2-realtime-interface-design@1.2.0
   - s3-frontend-constitution@1.1.0
   - s4-ai-dm-constitution@1.1.0
-  - verification-matrix@1.5.1
+  - verification-matrix@1.5.2
 overrides:
   - target: system-design@1.1.0#4
     scope: S4 dm_trace is clipped to template metadata and no raw diagnostics leave memory.
@@ -25,14 +25,14 @@ overrides:
     scope: S4 active admission is template-only; 2.0s remains the absolute ceiling.
   - target: system-design@1.1.0#12
     scope: S4 host audit exports clipped template trace only.
-supersedes: s4-ai-dm-design@1.1.0
+supersedes: s4-ai-dm-design@1.1.1
 ---
 
-# S4 AI DM 设计 v1.1.1
+# S4 AI DM 设计 v1.1.2
 
 ## 1. 状态与效力
 
-本文件是 S4 AI DM 的活动设计规格，状态为 `frozen`。它把 S4
+本文件是 S4 AI DM 的活动设计规格，当前状态为 `frozen`。它把 S4
 `template-only` 决策落实为可验证的模板链路。
 
 v1.0.0 的 provider、LLM、ContextBuilder、OutputGate、真实 provider
@@ -40,8 +40,10 @@ v1.0.0 的 provider、LLM、ContextBuilder、OutputGate、真实 provider
 provider 重新进入附录”中，但不能定义当前 schema、测试、指标或完成条件。
 
 v1.1.1 增加 canonical variant key、unused-fact 检测、admission 绝对
-deadline、双序列守恒指标、模板废弃预留字段和更严格的浏览器验收；
-不改变 active template-only 边界。
+deadline、双序列守恒指标、模板废弃预留字段和更严格的浏览器验收。
+v1.1.2 将“纯 SHA-256 digest 查询”修正为结构化
+`TemplateVariantKey` 查询；digest 改为独立纯函数，只用于 trace、
+日志关联和跨实例校验，不参与反向选择。
 
 本文件冻结设计边界，但不授权实现。implementation plan、provider 和任何
 S4 代码仍需明确授权。
@@ -94,6 +96,22 @@ S4 代码仍需明确授权。
 
 ## 4. 契约
 
+公共类型别名固定为：
+
+```python
+TemplateCategory = Literal[
+    "PHASE_NOTICE",
+    "DEATH_NOTICE",
+    "EXILE_NOTICE",
+    "NO_EXILE_NOTICE",
+    "SEAT_PROMPT",
+    "PAUSE_NOTICE",
+    "TERMINAL_NOTICE",
+]
+TemplateChannel = Literal["public", "seat"]
+TemplateStyle = Literal["neutral", "formal", "urgent"]
+```
+
 ### 4.1 TemplateIntent
 
 ```python
@@ -102,6 +120,7 @@ class TemplateIntent(StrictModel):
     source_event_id: UUID
     source_revision: int
     source_phase: Phase
+    catalog_version: str
     category: Literal[
         "PHASE_NOTICE",
         "DEATH_NOTICE",
@@ -289,8 +308,11 @@ admission 时若 `now > admission_deadline_monotonic_ms`，结果以
 | pause/resume/error recovery | `PAUSE_NOTICE` | public |
 | 终局 | `TERMINAL_NOTICE` | public |
 
-路由表硬编码。玩家正常发言不产生 intent；player speech 不进入 template
-facts；任何 intent 都不能产生 `llm_eligible`。
+路由表硬编码。Selector 对 public route 使用
+`(state, event, catalog_version)`；seat prompt 必须额外提供当前
+`seat_id`、`session_id` 和权威 `expected_session_id`，且后两者必须相等，
+否则 fail closed。玩家正常发言不产生 intent；player speech 不进入
+template facts；任何 intent 都不能产生 `llm_eligible`。
 
 ## 6. Template Registry
 
@@ -302,10 +324,26 @@ facts；任何 intent 都不能产生 `llm_eligible`。
 
 ### 6.2 Variant 选择
 
-Variant key 是 canonical JSON 的 lowercase SHA-256 hex digest：
+Variant descriptor 是查询输入，固定为严格不可变模型：
+
+```python
+class TemplateVariantKey(StrictModel):
+    catalog_version: str
+    category: TemplateCategory
+    channel: TemplateChannel
+    style: TemplateStyle
+    audience_bindings: tuple[TemplateAudience, ...]
+    source_event_id: UUID
+```
+
+`audience_bindings` 必须满足：public 为空；seat 恰好一个绑定。descriptor
+不得包含 `template_variant_id`、digest、provider、LLM 或动态文本。
+
+canonical JSON 固定为：
 
 ```json
 {
+  "catalog_version": "...",
   "category": "...",
   "channel": "public|seat",
   "style": "...",
@@ -317,20 +355,30 @@ Variant key 是 canonical JSON 的 lowercase SHA-256 hex digest：
 ```
 
 `audience_bindings` 先按 `(seat_id, session_id)` 排序，对象键排序，紧凑
-分隔符编码为 UTF-8 后计算 SHA-256。因此输入列表顺序不影响 key。
-`TemplateRegistry.catalog(catalog_version) -> TemplateCatalog` 返回 frozen
-catalog；`TemplateRegistry.resolve(intent) -> TemplateVariant` 计算 key 后
-选择唯一 variant；`TemplateRegistry.select_by_key(key: str) ->
-TemplateVariant` 只接受这个 digest。`template_variant_id` 是输出字段，
-不参与选择键。
+分隔符编码为 UTF-8，再由纯函数
+`template_variant_digest(key: TemplateVariantKey) -> str` 计算 lowercase
+SHA-256 hex digest。digest 只用于 trace、日志关联和跨实例一致性校验，
+不是查询输入，也不能用于反向恢复 descriptor。
 
-同一 key 必须稳定选择同一 variant。Variant 选择不得读取真实时间、全局
-随机数、环境变量、数据库或 provider。
+`TemplateRegistry.catalog(catalog_version) -> TemplateCatalog` 返回 frozen
+catalog；registry 构造后 catalog map 不可变，`select()` 不保留请求历史或
+调用状态。`TemplateRegistry.select(key: TemplateVariantKey) ->
+TemplateVariant` 是唯一查询入口，先按 descriptor 的 `catalog_version`
+定位 frozen catalog，再只使用 route 字段选择唯一 variant。
+`TemplateRegistry.resolve(intent) -> TemplateVariant` 是可选便利包装：
+先从 intent 构造 descriptor，再调用 `select()`。不提供
+`select_by_key(digest)`。
+
+同一 descriptor 必须在任意 registry 实例中稳定选择同一 variant。不同
+`source_event_id` 可以生成不同 digest，但只要 route 字段相同，就必须
+选择同一静态 variant。Variant 选择不得读取真实时间、全局随机数、环境
+变量、数据库、provider 或先前调用历史。
 
 ### 6.3 模板覆盖
 
-所有 route table category、public/seat、三种 style 都必须有至少一个合法
-variant；测试要检查未知 category、缺失 variant 和重复 ID 失败关闭。
+每个 `(catalog_version, category, channel, style)` 组合只能有一个合法
+variant；测试要检查未知 catalog/category、缺失 variant、重复 ID 和
+同一 route 多 variant 全部失败关闭。
 
 ## 7. TemplateRenderer
 
@@ -385,6 +433,9 @@ class TemplateDMService:
     ) -> TemplateRenderResult:
         ...
 ```
+
+`catalog_version` 必须与 `intent.catalog_version` 相同，否则
+`TemplateRenderError(INVALID_CATALOG)`。
 
 ### 8.2 行为
 
@@ -501,8 +552,9 @@ max_domain_transport_lag = max(domain_seq - transport_seq)
 - contract strictness；
 - intent 路由完整性；
 - catalog 覆盖、Unicode 和确定性；
-- variant key audience 顺序无关、renderer 事实绑定、unused fact、
-  claim 隔离和失败关闭；
+- variant descriptor 跨实例确定选择、catalog version 进入 digest、
+  audience cardinality 合法、纯 digest 稳定且不可查询、renderer
+  事实绑定、unused fact、claim 隔离和失败关闭；
 - service 无 I/O、确定性和错误；
 - metrics 终态守恒。
 
@@ -577,6 +629,19 @@ provider schema/refusal/truncation 和 raw prompt/output 测试全部 deferred�
 降低门禁必须提升产品规格版本并获得用户确认。
 
 ## 16. 变更历史
+
+### v1.1.2 - 2026-09-27
+
+- 修正 v1.1.1 中不可实现的 digest-only variant 查询：纯 SHA-256 无法
+  从 digest 反推包含 `source_event_id` 和 audience 的 route。
+- 增加结构化 `TemplateVariantKey`，并将
+  `TemplateRegistry.select(key)` 设为唯一 variant 查询入口。
+- 将 `catalog_version` 纳入 descriptor 与 digest，消除无版本查询歧义。
+- 将 `catalog_version` 纳入 `TemplateIntent`，并写清 seat selector 的
+  `seat_id/session_id/expected_session_id` fail-closed 接口。
+- 将 `template_variant_digest(key)` 定义为无状态纯函数，仅用于 trace、
+  日志关联和跨实例一致性校验。
+- 删除 `select_by_key(digest)`；跨实例选择与 digest 一致性改为永久回归。
 
 ### v1.1.1 - 2026-09-27
 
