@@ -26,6 +26,7 @@ from werewolf_dm.application.dm_service import TemplateDMService
 from werewolf_dm.interfaces.http_ws.runtime import ConnectionSink
 
 SAMPLE_COUNT = 40
+LAT004_ROUNDS = 20
 
 
 class RecordingSocket:
@@ -92,7 +93,13 @@ async def test_lat_004_six_client_dm_message_p95_under_300ms() -> None:
                 core = _core_with_wolf_win(poison_good=False)
                 room.core = core
                 room.clock = core.clock
-                await room.consume_announcements()
+                room._completed_domain_seqs.clear()
+                room._announcement_slots.clear()
+                room._announcement_candidates.clear()
+                dm_domain_seq = max(
+                    item.seq for item in core.state.outbox if item.kind == "dm.message"
+                )
+                await room.consume_slot(domain_seq=dm_domain_seq)
 
             def receive_dm_message(socket_: ClientConnection) -> float:
                 while True:
@@ -100,25 +107,19 @@ async def test_lat_004_six_client_dm_message_p95_under_300ms() -> None:
                     if message.get("type") == "dm.message":
                         return (perf_counter() - started) * 1000.0
 
-            def drain_socket(socket_: ClientConnection) -> None:
-                while True:
-                    try:
-                        socket_.recv(timeout=0.05)
-                    except TimeoutError:
-                        return
+            samples: list[float] = []
+            for _ in range(LAT004_ROUNDS):
+                with ThreadPoolExecutor(max_workers=len(sockets)) as executor:
+                    started = perf_counter()
+                    pending = [executor.submit(receive_dm_message, socket_) for socket_ in sockets]
+                    admitted = asyncio.run_coroutine_threadsafe(replace_and_admit(), loop)
+                    admitted.result(timeout=5)
+                    samples.extend(future.result(timeout=5) for future in pending)
 
-            with ThreadPoolExecutor(max_workers=len(sockets)) as executor:
-                drained = [executor.submit(drain_socket, socket_) for socket_ in sockets]
-                for future in drained:
-                    future.result(timeout=5)
-                started = perf_counter()
-                pending = [executor.submit(receive_dm_message, socket_) for socket_ in sockets]
-                admitted = asyncio.run_coroutine_threadsafe(replace_and_admit(), loop)
-                admitted.result(timeout=5)
-                samples = [future.result(timeout=5) for future in pending]
-
-    assert len(samples) == 6
-    assert _p95(samples) < 300
+    assert len(samples) == LAT004_ROUNDS * len(sockets)
+    measured_p95 = _p95(samples)
+    print(f"LAT-004 template six-client dm.message p95={measured_p95:.3f}ms samples={len(samples)}")
+    assert measured_p95 < 300
 
 
 @pytest.mark.asyncio
