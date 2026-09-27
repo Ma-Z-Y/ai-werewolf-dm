@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import math
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from datetime import timedelta
 from time import perf_counter
 from unittest.mock import patch
 
 import pytest
+from websockets.sync.client import ClientConnection
 
 from tests.conftest import _core_with_wolf_win
 from tests.factories import ROOM_ID
@@ -92,16 +94,18 @@ async def test_lat_004_six_client_dm_message_p95_under_300ms() -> None:
                 room.clock = core.clock
                 await room.consume_announcements()
 
-            started = perf_counter()
-            admitted = asyncio.run_coroutine_threadsafe(replace_and_admit(), loop)
-            admitted.result(timeout=5)
-            samples: list[float] = []
-            for socket_ in sockets:
+            def receive_dm_message(socket_: ClientConnection) -> float:
                 while True:
                     message = receive_json(socket_)
                     if message.get("type") == "dm.message":
-                        samples.append((perf_counter() - started) * 1000.0)
-                        break
+                        return (perf_counter() - started) * 1000.0
+
+            started = perf_counter()
+            with ThreadPoolExecutor(max_workers=len(sockets)) as executor:
+                pending = [executor.submit(receive_dm_message, socket_) for socket_ in sockets]
+                admitted = asyncio.run_coroutine_threadsafe(replace_and_admit(), loop)
+                admitted.result(timeout=5)
+                samples = [future.result(timeout=5) for future in pending]
 
     assert len(samples) == 6
     assert _p95(samples) < 300
