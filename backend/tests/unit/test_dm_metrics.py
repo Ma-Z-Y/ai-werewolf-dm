@@ -128,6 +128,14 @@ def test_metrics_reject_mapping_and_empty_state_invariant_bypasses(
         DMMetrics(**payload)
 
 
+def test_metrics_reject_explicit_null_mapping_and_negative_latency() -> None:
+    with pytest.raises(ValidationError):
+        DMMetrics.model_validate_json('{"domain_to_transport": null}')
+
+    with pytest.raises(ValidationError):
+        DMMetrics(admission_ms=(-1,))
+
+
 def test_metrics_mapping_supports_copy_revalidate_and_json_serialization() -> None:
     metrics = DMMetrics(domain_to_transport={1: 1, 3: 2})
 

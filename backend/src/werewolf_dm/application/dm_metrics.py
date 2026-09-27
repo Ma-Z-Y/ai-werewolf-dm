@@ -83,9 +83,6 @@ def _max_transport_lag(mapping: Mapping[int, int]) -> int:
 
 def _derive_domain_defaults(raw: dict[str, object]) -> None:
     mapping = raw.get("domain_to_transport", {})
-    if mapping is None:
-        mapping = {}
-        raw["domain_to_transport"] = mapping
 
     if "mapped_domain_slots" not in raw:
         if "template_admitted" in raw:
@@ -129,6 +126,13 @@ class _DMMetricBase(StrictModel):
     render_failed: int = Field(default=0, ge=0)
     slot_suppressed: int = Field(default=0, ge=0)
     admission_ms: tuple[int, ...] = ()
+
+    @field_validator("admission_ms")
+    @classmethod
+    def validate_admission_ms(cls, value: tuple[int, ...]) -> tuple[int, ...]:
+        if any(elapsed_ms < 0 for elapsed_ms in value):
+            raise ValueError("admission_ms entries must be non-negative")
+        return value
 
     @property
     def completed(self) -> int:
