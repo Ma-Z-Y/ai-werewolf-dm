@@ -1,6 +1,6 @@
 import { Check, CircleX, Moon, Sun, Wifi, WifiOff } from "lucide-react";
 
-import type { LegalAction, SeatView } from "../../protocol/models";
+import type { DMMessage, LegalAction, SeatView } from "../../protocol/models";
 import type { RoomSocketState } from "../../realtime/RoomSocket";
 
 import { DayDiscussionScreen } from "./DayDiscussionScreen";
@@ -13,6 +13,7 @@ export interface SeatShellProps {
   roomCode: string;
   seatId: number;
   connectionState: RoomSocketState;
+  dmMessages?: DMMessage[];
   seatView: SeatView;
   ready: boolean;
   actionPending: boolean;
@@ -68,6 +69,7 @@ export function SeatShell({
   roomCode,
   seatId,
   connectionState,
+  dmMessages = [],
   seatView,
   ready,
   actionPending,
@@ -97,6 +99,12 @@ export function SeatShell({
   );
   const isGameEnd = seatView.phase === "GAME_END";
   const recentTimeline = seatView.public_timeline.slice(-3);
+  const safeDmMessages = dmMessages.filter(
+    (message) =>
+      message.message.channel === "seat" &&
+      message.message.room_id === seatView.room_id &&
+      message.message.audience_bindings[0]?.seat_id === seatId,
+  );
 
   return (
     <main className="min-h-screen bg-surface px-5 py-8 text-text sm:px-8">
@@ -156,6 +164,25 @@ export function SeatShell({
             </ol>
           )}
         </section>
+
+        {safeDmMessages.length === 0 ? null : (
+          <section aria-label="DM 提示" aria-live="polite" className="grid gap-2 rounded-lg bg-surface-raised p-5">
+            <h2 className="text-lg font-semibold">DM 提示</h2>
+            {safeDmMessages.map((message) => (
+              <p
+                className="break-words text-sm font-medium"
+                data-channel={message.message.channel}
+                data-outbox-seq={message.outbox_seq}
+                data-revision={message.message.revision}
+                data-source="template"
+                data-testid="dm-message"
+                key={message.message.message_id}
+              >
+                {message.message.text}
+              </p>
+            ))}
+          </section>
+        )}
 
         <RoleRevealSheet
           privateFacts={seatView.private_facts}

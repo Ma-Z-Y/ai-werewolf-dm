@@ -12,7 +12,7 @@ import {
   WifiOff,
 } from "lucide-react";
 
-import type { PublicView } from "../../protocol/models";
+import type { DMMessage, PublicView } from "../../protocol/models";
 import type { RoomSocketState } from "../../realtime/RoomSocket";
 
 import { StageTimeline } from "./StageTimeline";
@@ -22,6 +22,7 @@ import { useStageDisplay } from "./useStageDisplay";
 export interface StageShellProps {
   roomCode: string;
   connectionState: RoomSocketState;
+  dmMessages?: DMMessage[];
   publicView: PublicView;
   serverTime: string;
   errorMessage: string | null;
@@ -88,6 +89,7 @@ function ConnectionStatus({ state }: { state: RoomSocketState }) {
 export function StageShell({
   roomCode,
   connectionState,
+  dmMessages = [],
   publicView,
   serverTime,
   errorMessage,
@@ -105,6 +107,11 @@ export function StageShell({
           .reverse()
           .find((item) => item.event_type === "GAME_ENDED")?.statement ?? null
       : null;
+  const safeDmMessages = dmMessages.filter(
+    (message) =>
+      message.message.channel === "public" &&
+      message.message.room_id === publicView.room_id,
+  );
 
   return (
     <main
@@ -222,6 +229,25 @@ export function StageShell({
                 >
                   {gameEndedResult}
                 </p>
+              </section>
+            )}
+
+            {safeDmMessages.length === 0 ? null : (
+              <section aria-label="DM 提示" aria-live="polite" className="grid gap-2">
+                <h2 className="text-lg font-semibold">DM 提示</h2>
+                {safeDmMessages.map((dm) => (
+                  <p
+                    className="break-words text-base font-medium"
+                    data-channel={dm.message.channel}
+                    data-outbox-seq={dm.outbox_seq}
+                    data-revision={dm.message.revision}
+                    data-source="template"
+                    data-testid="dm-message"
+                    key={dm.message.message_id}
+                  >
+                    {dm.message.text}
+                  </p>
+                ))}
               </section>
             )}
 

@@ -33,6 +33,15 @@
 - S3 验收修复：20 秒 WebSocket 心跳、4003 接管终态、per-tab 会话抑制、
   暂停刷新计时、SET_READY 重试、host 在途副作用隔离、服务端相对配对
   TTL、回放私密事实二次过滤和前端/TypeScript CodeQL。
+- S4 Template-Only AI DM：严格模板契约、fact allowlist、确定性
+  renderer、同步 template service、RoomActor ordered outbox 与
+  DM transport sequence、严格 metrics/trace privacy。
+- S4 前端 `dm.message`：公开模板只进入共享舞台，seat 模板只进入匹配
+  座位；消息渲染不暴露 trace、token、session、provider、prompt 或
+  private facts。
+- S4 E2E 与延迟：固定 room/seed/session/catalog 字节确定性、
+  六客户端同 revision 证据、暂停/重连/终局顺序，以及真实模板
+  LAT-001/004/005 和独立 latency CI job。
 
 ### Security
 
@@ -44,3 +53,6 @@
   消除 Dependabot 的安全更新失败。
 - 房间删除或过期会主动关闭已认证连接；malformed ping 和未知协议消息不会
   刷新空闲时间或绕过连接洪泛控制。
+- S4 DM 渲染继续执行 public/seat 分区；浏览器 E2E 阻断 provider 与非
+  loopback 外联。生产 `SEAT_PROMPT` 生成仍未实现，seat 浏览器证据来自
+  E2E-only injection，不代表生产能力已完成。

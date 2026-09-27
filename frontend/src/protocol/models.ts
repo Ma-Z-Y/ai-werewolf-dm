@@ -61,6 +61,28 @@ export interface PrivateFact {
   payload: Record<string, unknown>;
 }
 
+export interface DMTemplateAudience {
+  seat_id: number;
+  session_id: string;
+}
+
+export interface DMTemplateMessage {
+  message_id: string;
+  room_id: string;
+  revision: number;
+  channel: "public" | "seat";
+  audience_bindings: DMTemplateAudience[];
+  text: string;
+  source: "template";
+}
+
+export interface DMMessage {
+  type: "dm.message";
+  server_time: string;
+  outbox_seq: number;
+  message: DMTemplateMessage;
+}
+
 export interface VoteSummary {
   round_id: string;
   tallies: Array<{ seat_id: number; votes: number }>;

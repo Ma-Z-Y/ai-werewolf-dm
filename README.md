@@ -17,7 +17,10 @@
 - S3 React 前端：S3-P0-01 至 S3-13 已完成实现、全量验收、独立复核和
   运行时防护修复；CI 与根交付门禁覆盖前端 lint、类型检查、单元测试、
   构建和 Playwright 六人浏览器闭环。
-- S4 AI DM：尚未开始。
+- S4 Template-Only AI DM：S4-01 至 S4-06 已完成实现、本地验收、四路
+  独立复核和完整交付门禁。当前只覆盖模板默认路径；真实生产
+  `SEAT_PROMPT` 生成仍为 deferred，seat 浏览器隔离证据来自
+  E2E-only injection。
 
 准确状态和下一步以
 [`docs/specs/README.md`](docs/specs/README.md) 与

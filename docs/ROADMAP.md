@@ -20,13 +20,19 @@
   日志脱敏与 latency CI 门禁。
 - [x] S3 React 前端：display/seat/host/replay 闭环、设计 token、
   六浏览器确定性 E2E，以及前端和 E2E CI/根交付门禁。
+- [x] S4 Template-Only AI DM：严格模板契约、确定性 renderer、
+  template-only service、RoomActor ordered outbox/transport、
+  metrics/trace privacy、前端 `dm.message` 隔离与真实模板延迟回归。
+  真实生产 `SEAT_PROMPT` 生成仍为 deferred，seat 浏览器证据来自
+  E2E-only injection。
 
 ## 下一步
 
-- [ ] S4 AI DM。
+- [ ] 后续版本化设计生产 `SEAT_PROMPT` 生成与 provider 重入。
 
 每项任务只有在实现、确定性测试、独立复核和用户验收都完成后才会标记为
-完成。正式版本只会在对应阶段的验收出口通过后发布。当前 S2 本地与 CI
-基线为 `487 passed, 6 skipped`，latency marker 为
-`4 passed, 2 skipped`；前端单元/组件测试为 `166 passed`，Playwright
-浏览器测试为 `3 passed`。CI 与根交付门禁同时覆盖后端和前端。
+完成。正式版本只会在对应阶段的验收出口通过后发布。当前 S4 本地与 CI
+基线为 backend `622 passed, 9 skipped`，latency marker 为
+`7 passed, 2 skipped`；前端单元/组件测试为 `166 passed`，Playwright
+浏览器测试为 `14 passed`。CI 与根交付门禁同时覆盖后端、前端和隔离的
+latency job。
