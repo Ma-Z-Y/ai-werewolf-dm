@@ -100,8 +100,18 @@ async def test_lat_004_six_client_dm_message_p95_under_300ms() -> None:
                     if message.get("type") == "dm.message":
                         return (perf_counter() - started) * 1000.0
 
-            started = perf_counter()
+            def drain_socket(socket_: ClientConnection) -> None:
+                while True:
+                    try:
+                        socket_.recv(timeout=0.05)
+                    except TimeoutError:
+                        return
+
             with ThreadPoolExecutor(max_workers=len(sockets)) as executor:
+                drained = [executor.submit(drain_socket, socket_) for socket_ in sockets]
+                for future in drained:
+                    future.result(timeout=5)
+                started = perf_counter()
                 pending = [executor.submit(receive_dm_message, socket_) for socket_ in sockets]
                 admitted = asyncio.run_coroutine_threadsafe(replace_and_admit(), loop)
                 admitted.result(timeout=5)
