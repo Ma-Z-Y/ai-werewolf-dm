@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import MappingProxyType
 from uuid import uuid4
 
 import pytest
@@ -142,7 +143,7 @@ def test_metrics_mapping_supports_copy_revalidate_and_json_serialization() -> No
     }
 
 
-def test_transport_failed_is_not_an_admission_terminal_and_is_not_double_counted() -> None:
+def test_transport_failed_is_distinct_from_slot_suppressed() -> None:
     intent_id = uuid4()
     admitted = _trace(intent_id=intent_id, elapsed_ms=4)
     transport_failed = _trace(
@@ -164,6 +165,15 @@ def test_transport_failed_is_not_an_admission_terminal_and_is_not_double_counted
     assert metrics.slot_suppressed == 0
     assert metrics.completed == 1
     assert metrics.admission_ms == (4,)
+
+
+def test_dm_metrics_nested_values_are_immutable() -> None:
+    metrics = DMMetrics(domain_to_transport={1: 1, 2: 3})
+
+    assert isinstance(metrics.domain_to_transport, MappingProxyType)
+    assert all(type(value) is int for value in metrics.domain_to_transport.values())
+    with pytest.raises(TypeError):
+        metrics.domain_to_transport[3] = 4
 
 
 def test_duplicate_slot_does_not_double_count_a_terminal_slot() -> None:

@@ -6,6 +6,8 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
+import pytest
+from fastapi import APIRouter
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
@@ -15,12 +17,18 @@ from werewolf_dm.application.dm_contracts import DMTraceRecord
 from werewolf_dm.application.rooms import RoomActor, RoomRegistry, SequenceTokenSource
 from werewolf_dm.interfaces.http_ws.app import create_app
 from werewolf_dm.interfaces.http_ws.audit import router as audit_router
+from werewolf_dm.interfaces.http_ws.metrics import (
+    DMTemplateMetricsPayload,
+    Metrics,
+    _validate_audit_route_installation,
+)
 
 _START = datetime(2026, 9, 27, tzinfo=UTC)
 _ROOM_CODE = "ROOM01"
 _HOST_TOKEN = "host-token-private"
 _SEAT_TOKEN = "seat-token-private"
 _HIDDEN_TEMPLATE_SENTINEL = "HIDDEN_TEMPLATE_SENTINEL"
+_INCLUDE_DESCRIPTION = "Comma-separated audit sections; supports dm_trace."
 _TRACE_KEYS = {
     "trace_id",
     "intent_id",
@@ -182,7 +190,7 @@ def test_metrics_exposes_template_counters_rates_lag_and_ratio() -> None:
     )
 
 
-def test_audit_route_is_single_and_documents_include() -> None:
+def test_audit_include_dm_trace_is_documented_in_openapi() -> None:
     with _privacy_client() as (client, _):
         openapi = client.get("/openapi.json").json()
 
@@ -196,4 +204,38 @@ def test_audit_route_is_single_and_documents_include() -> None:
     ]
     assert len(audit_routes) == 1
     parameters = openapi["paths"]["/rooms/{room_code}/audit"]["get"]["parameters"]
-    assert any(parameter["name"] == "include" for parameter in parameters)
+    include_parameter = next(
+        parameter for parameter in parameters if parameter["name"] == "include"
+    )
+    assert include_parameter["description"] == _INCLUDE_DESCRIPTION
+
+
+def test_audit_route_installation_fails_if_dm_trace_query_missing() -> None:
+    router = APIRouter(prefix="/rooms")
+
+    @router.get("/{room_code}/audit")
+    async def undocumented_audit(include: str = "") -> None:
+        del include
+        return None
+
+    routes = [route for route in router.routes if isinstance(route, APIRoute)]
+    with pytest.raises(RuntimeError, match="DM_TRACE_AUDIT_ROUTE_INVALID"):
+        _validate_audit_route_installation(routes)
+
+
+def test_metrics_response_schema_matches_openapi() -> None:
+    with _privacy_client() as (client, _):
+        openapi = client.get("/openapi.json").json()
+
+    schemas = openapi["components"]["schemas"]
+    template_properties = schemas["DMTemplateMetricsPayload"]["properties"]
+    metrics_properties = schemas["Metrics"]["properties"]
+
+    assert set(template_properties) == set(DMTemplateMetricsPayload.model_fields)
+    assert set(metrics_properties) == set(Metrics.model_fields)
+    for name, field in DMTemplateMetricsPayload.model_fields.items():
+        assert field.description
+        assert template_properties[name]["description"] == field.description
+    for name, field in Metrics.model_fields.items():
+        assert field.description
+        assert metrics_properties[name]["description"] == field.description

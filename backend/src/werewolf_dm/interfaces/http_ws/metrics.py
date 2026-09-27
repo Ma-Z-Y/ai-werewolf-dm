@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import math
 from collections import deque
+from collections.abc import Iterable
 from typing import cast
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Query, Request
 from fastapi.routing import APIRoute
+from pydantic import Field
 
 from werewolf_dm.application.dm_metrics import (
     DMAggregateMetrics,
@@ -22,16 +24,30 @@ from werewolf_dm.interfaces.http_ws.authorization import authorize_bearer
 
 
 class DMTemplateMetricsPayload(StrictModel):
-    eligible: int
-    template_admitted: int
-    render_failed: int
-    slot_suppressed: int
-    template_admission_rate: float
-    render_failure_rate: float
-    slot_suppressed_rate: float
-    admission_ms_p95: float
-    domain_transport_ratio: float
-    max_domain_transport_lag: int
+    eligible: int = Field(description="Eligible template domain slots.")
+    template_admitted: int = Field(description="Slots admitted to the wire outbox.")
+    render_failed: int = Field(description="Slots that failed closed during rendering.")
+    slot_suppressed: int = Field(
+        description="Slots suppressed before admission; excludes transport failures."
+    )
+    template_admission_rate: float = Field(
+        description="template_admitted divided by completed admission terminals."
+    )
+    render_failure_rate: float = Field(
+        description="render_failed divided by completed admission terminals."
+    )
+    slot_suppressed_rate: float = Field(
+        description="slot_suppressed divided by completed admission terminals."
+    )
+    admission_ms_p95: float = Field(
+        description="Nearest-rank p95 of admission latency in milliseconds."
+    )
+    domain_transport_ratio: float = Field(
+        description="Mapped domain slots divided by completed domain slots."
+    )
+    max_domain_transport_lag: int = Field(
+        description="Maximum positive domain_seq minus transport_seq lag."
+    )
 
     @classmethod
     def from_metrics(
@@ -53,14 +69,21 @@ class DMTemplateMetricsPayload(StrictModel):
 
 
 class Metrics(StrictModel):
-    active_rooms: int
-    active_connections: int
-    auth_failures: int
-    slow_connection_closes: int
-    command_latency_ms_p95: float
-    broadcast_latency_ms_p95: float
-    max_connection_queue_depth: int
-    dm_template: DMTemplateMetricsPayload | None = None
+    active_rooms: int = Field(description="Current in-memory room count.")
+    active_connections: int = Field(description="Current open connection count.")
+    auth_failures: int = Field(description="Cumulative authentication failures.")
+    slow_connection_closes: int = Field(description="Cumulative slow connection closes.")
+    command_latency_ms_p95: float = Field(
+        description="Command ACK admission-to-writer latency p95 in milliseconds."
+    )
+    broadcast_latency_ms_p95: float = Field(
+        description="Broadcast admission-to-writer latency p95 in milliseconds."
+    )
+    max_connection_queue_depth: int = Field(description="Maximum observed connection queue depth.")
+    dm_template: DMTemplateMetricsPayload | None = Field(
+        default=None,
+        description="Template-only DM metrics, omitted until template activity exists.",
+    )
 
 
 class LatencyRecorder:
@@ -149,7 +172,10 @@ def _replace_host_audit_route() -> None:
     async def audit_with_dm_trace(
         room_code: str,
         request: Request,
-        include: str = "",
+        include: str = Query(
+            default="",
+            description="Comma-separated audit sections; supports dm_trace.",
+        ),
     ) -> HostAuditExport:
         actor, authenticated, _ = authorize_bearer(request, room_code, "host")
         audit = project_host_audit(actor.core.state, actor.core.events, authenticated)
@@ -178,4 +204,31 @@ def _replace_host_audit_route() -> None:
     audit_router.routes[0:0] = replacement.routes
 
 
+def _host_audit_routes() -> tuple[APIRoute, ...]:
+    return tuple(
+        route
+        for route in audit_router.routes
+        if isinstance(route, APIRoute)
+        and route.path.endswith("/{room_code}/audit")
+        and route.methods is not None
+        and "GET" in route.methods
+    )
+
+
+def _route_declares_include(route: APIRoute) -> bool:
+    return any(
+        parameter.name == "include" and parameter.field_info.description
+        for parameter in route.dependant.query_params
+    )
+
+
+def _validate_audit_route_installation(
+    routes: Iterable[APIRoute] | None = None,
+) -> None:
+    resolved = _host_audit_routes() if routes is None else tuple(routes)
+    if len(resolved) != 1 or not _route_declares_include(resolved[0]):
+        raise RuntimeError("DM_TRACE_AUDIT_ROUTE_INVALID")
+
+
 _replace_host_audit_route()
+_validate_audit_route_installation()
