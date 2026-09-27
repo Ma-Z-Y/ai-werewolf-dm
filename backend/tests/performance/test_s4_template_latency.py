@@ -22,6 +22,7 @@ from tests.integration.http_ws.test_six_client_flow import (
     receive_json,
     running_server,
 )
+from werewolf_dm.application.core import GameCore
 from werewolf_dm.application.dm_service import TemplateDMService
 from werewolf_dm.interfaces.http_ws.runtime import ConnectionSink
 
@@ -75,6 +76,7 @@ async def test_lat_004_six_client_dm_message_p95_under_300ms() -> None:
     with patch("werewolf_dm.application.rooms.uuid4", return_value=ROOM_ID):
         created = registry.create_room(timedelta(hours=1))
     joined = [registry.join_room(created.room_code, f"P{seat}") for seat in range(1, 7)]
+    cores = [_core_with_wolf_win(poison_good=False) for _ in range(LAT004_ROUNDS)]
 
     with running_server(registry) as (_, loop, port):
         cleanup = asyncio.run_coroutine_threadsafe(
@@ -89,8 +91,7 @@ async def test_lat_004_six_client_dm_message_p95_under_300ms() -> None:
                 for joined_room in joined
             ]
 
-            async def replace_and_admit() -> None:
-                core = _core_with_wolf_win(poison_good=False)
+            async def replace_and_admit(core: GameCore) -> None:
                 room.core = core
                 room.clock = core.clock
                 room._completed_domain_seqs.clear()
@@ -108,11 +109,11 @@ async def test_lat_004_six_client_dm_message_p95_under_300ms() -> None:
                         return (perf_counter() - started) * 1000.0
 
             samples: list[float] = []
-            for _ in range(LAT004_ROUNDS):
+            for core in cores:
                 with ThreadPoolExecutor(max_workers=len(sockets)) as executor:
                     started = perf_counter()
                     pending = [executor.submit(receive_dm_message, socket_) for socket_ in sockets]
-                    admitted = asyncio.run_coroutine_threadsafe(replace_and_admit(), loop)
+                    admitted = asyncio.run_coroutine_threadsafe(replace_and_admit(core), loop)
                     admitted.result(timeout=5)
                     samples.extend(future.result(timeout=5) for future in pending)
 
