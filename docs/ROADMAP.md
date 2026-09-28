@@ -30,6 +30,10 @@
 
 ## 下一步
 
+- [ ] P1 上线前补强：评审
+  `docs/specs/2026-09-28-host-recovery-persistence-design.md`，确认主持人
+  纠错、快照回退和最小 SQLite 持久化边界后，生成逐任务 TDD
+  implementation plan。
 - [ ] 后续版本化设计 provider/LLM 重入。
 
 每项任务只有在实现、确定性测试、独立复核和用户验收都完成后才会标记为
