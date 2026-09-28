@@ -23,9 +23,10 @@
 - [x] S4 Template-Only AI DM：严格模板契约、确定性 renderer、
   template-only service、RoomActor ordered outbox/transport、
   metrics/trace privacy、前端 `dm.message` 隔离与真实模板延迟回归。
-- [ ] S4-07 生产 `SEAT_PROMPT`：`RoomActor` 按当前 seat session 从夜阶段
+- [x] S4-07 生产 `SEAT_PROMPT`：`RoomActor` 按当前 seat session 从夜阶段
   outbox 投递座位提示，离线槽不阻塞后续槽，浏览器证据使用真实生产消息；
-  生产实现、真实浏览器 E2E、独立复核和交付门禁已完成；待用户最终验收。
+  生产实现、真实浏览器 E2E、独立复核和交付门禁已完成；用户已于
+  2026-09-28 正式验收通过。
 
 ## 下一步
 

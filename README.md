@@ -19,7 +19,8 @@
   构建和 Playwright 六人浏览器闭环。
 - S4 Template-Only AI DM：S4-01 至 S4-06 已完成实现、独立复核并获用户
   验收。S4-07 已完成生产实现、真实浏览器 E2E、独立复核和完整交付
-  门禁，用户验收单独记录。`RoomActor` 现在从领域 outbox 生产
+  门禁，并已于 2026-09-28 由用户正式验收通过。`RoomActor` 现在从领域
+  outbox 生产
   `SEAT_PROMPT`，浏览器隔离证据直接来自真实生产消息，不再需要
   E2E-only injection。Provider/LLM 仍保持 deferred。
 
