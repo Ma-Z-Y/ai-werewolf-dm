@@ -11,6 +11,6 @@ def test_healthz_returns_strict_health_payload() -> None:
     assert response.status_code == 200
     assert response.json() == {
         "status": "ok",
-        "version": "0.2.0",
+        "version": "0.3.0",
         "active_rooms": 0,
     }
