@@ -1,6 +1,6 @@
 import hashlib
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
@@ -27,8 +27,10 @@ from werewolf_dm.infrastructure.persistence import (
     PersistedToken,
     PersistenceConflictError,
     PersistenceCorruptionError,
+    PersistenceNotFoundError,
     SQLiteRoomStore,
 )
+from werewolf_dm.interfaces.http_ws import runtime
 
 ROOM_ID = UUID("00000000-0000-0000-0000-000000000001")
 COMMAND_ID = UUID("10000000-0000-0000-0000-000000000001")
@@ -376,6 +378,30 @@ def test_deleting_room_cannot_erase_event_history(tmp_path: Path) -> None:
     assert event_count == (len(sample_events()),)
 
 
+def test_delete_room_removes_owned_state_but_retains_events(tmp_path: Path) -> None:
+    store = SQLiteRoomStore(tmp_path / "rooms.sqlite3")
+    store.migrate()
+    store.save_room(sample_persisted_room())
+    store.save_token(sample_persisted_token())
+    store.save_core(ROOM_ID, sample_state(), sample_events())
+    store.save_room_runtime(ROOM_ID, sample_runtime())
+
+    store.delete_room(ROOM_ID)
+
+    assert store.load_rooms() == ()
+    assert store.load_tokens() == ()
+    with pytest.raises(PersistenceNotFoundError):
+        store.load_room_runtime(ROOM_ID)
+    connection = sqlite3.connect(tmp_path / "rooms.sqlite3")
+    event_count = connection.execute(
+        "SELECT COUNT(*) FROM room_events WHERE room_id = ?",
+        (str(ROOM_ID),),
+    ).fetchone()
+    connection.close()
+    assert event_count == (len(sample_events()),)
+    store.close()
+
+
 def test_save_core_validates_complete_history_digest(tmp_path: Path) -> None:
     store = SQLiteRoomStore(tmp_path / "rooms.sqlite3")
     store.migrate()
@@ -495,3 +521,28 @@ def test_load_recovery_audit_rejects_malformed_diff_json(tmp_path: Path) -> None
 def test_command_dedupe_key_requires_non_empty_actor_key() -> None:
     with pytest.raises(ValueError):
         CommandDedupeKey(command_id=COMMAND_ID, actor_type="host", actor_key="")
+
+
+def test_build_production_registry_uses_env_database_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "nested" / "rooms.sqlite3"
+    monkeypatch.setenv("WEREWOLF_DM_DB_PATH", str(database_path))
+
+    registry = runtime.build_production_registry()
+    created = registry.create_room(timedelta(hours=1))
+    assert database_path.exists()
+    assert registry.store is not None
+    registry.store.close()
+
+    reopened = SQLiteRoomStore(database_path)
+    reopened.migrate()
+    assert reopened.load_rooms()[0].room_id == created.room_id
+    reopened.close()
+
+
+def test_default_database_path_is_project_local(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("WEREWOLF_DM_DB_PATH", raising=False)
+    expected = Path(runtime.__file__).resolve().parents[4] / "data" / "werewolf_dm.sqlite3"
+    assert runtime._default_database_path() == expected

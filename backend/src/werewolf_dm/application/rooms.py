@@ -5,7 +5,7 @@ import contextlib
 import hashlib
 import secrets
 import string
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from time import monotonic_ns
@@ -46,8 +46,14 @@ from werewolf_dm.domain.visibility import (
     project_public_view,
     project_seat_view,
 )
+from werewolf_dm.infrastructure.persistence import (
+    PersistedRoom,
+    PersistedToken,
+    SQLiteRoomStore,
+)
 
 _DM_CATALOG_VERSION = "s4-template-v1"
+_RULEPACK_VERSION: Literal["1.1.0"] = "1.1.0"
 UuidSource = Callable[[], UUID]
 
 
@@ -366,6 +372,21 @@ class TokenService:
         self._seat_records.setdefault(room_id, {})[seat_id] = record
         return raw, expires_at
 
+    def restore(self, records: Iterable[TokenRecord]) -> None:
+        self._records.clear()
+        self._seat_records.clear()
+        self._display_records.clear()
+        now = self.clock()
+        for record in records:
+            if record.expires_at <= now:
+                continue
+            self._records[record.token_digest] = record
+            if record.actor_type == "seat":
+                assert record.seat_id is not None
+                self._seat_records.setdefault(record.room_id, {})[record.seat_id] = record
+            elif record.actor_type == "display":
+                self._display_records[record.room_id] = record
+
     def resolve(self, raw_token: str) -> TokenRecord:
         record = self._records.get(self.digest(raw_token))
         if record is None:
@@ -439,6 +460,7 @@ class RoomActor:
         dm_service: TemplateDMService | None = None,
         monotonic_ms: Callable[[], int] | None = None,
         uuid_source: UuidSource = uuid4,
+        activity_sink: Callable[[RoomActor], None] | None = None,
     ) -> None:
         self.room_id = room_id
         self.room_code = room_code
@@ -476,6 +498,7 @@ class RoomActor:
         self._monotonic_ms_source = monotonic_ms or (lambda: monotonic_ns() // 1_000_000)
         self._fixed_monotonic_ms: int | None = None
         self._uuid_source = uuid_source
+        self._activity_sink = activity_sink
 
     @property
     def client_outbox_seq(self) -> int:
@@ -858,6 +881,8 @@ class RoomActor:
 
     def touch(self, *, now: datetime | None = None) -> None:
         self.last_activity_at = self.clock() if now is None else now
+        if self._activity_sink is not None:
+            self._activity_sink(self)
 
     def _reject_pending_futures(self, exc: BaseException) -> None:
         failure = RoomClosedError("ROOM_CLOSED") if isinstance(exc, asyncio.CancelledError) else exc
@@ -1301,6 +1326,7 @@ class RoomRegistry:
         max_rooms: int = 256,
         max_connections: int = 1024,
         uuid_source: UuidSource = uuid4,
+        store: SQLiteRoomStore | None = None,
     ) -> None:
         if max_rooms <= 0 or max_connections <= 0:
             raise ValueError("ROOM_LIMIT_INVALID")
@@ -1314,12 +1340,110 @@ class RoomRegistry:
         self._uuid_source = uuid_source
         self.max_rooms = max_rooms
         self.max_connections = max_connections
+        self.store = store
         self.rooms: dict[str, RoomActor] = {}
         self.active_connections = 0
         self.auth_failures = 0
         self.slow_connection_closes = 0
         self._display_pairings: dict[UUID, DisplayPairing] = {}
         self._pairing_attempts: dict[tuple[UUID, str], tuple[datetime, int]] = {}
+        if self.store is not None:
+            self._restore_from_store(self.store)
+
+    def _restore_from_store(self, store: SQLiteRoomStore) -> None:
+        now = self.clock()
+        persisted_rooms = tuple(room for room in store.load_rooms() if room.expires_at > now)
+        actors_by_id: dict[UUID, RoomActor] = {}
+        for persisted in persisted_rooms:
+            actor = self._new_actor(
+                room_id=persisted.room_id,
+                room_code=persisted.room_code,
+                seed=persisted.seed,
+                expires_at=persisted.expires_at,
+                last_activity_at=persisted.last_activity_at,
+            )
+            self.rooms[persisted.room_code] = actor
+            actors_by_id[persisted.room_id] = actor
+
+        records = tuple(
+            self._token_record(token)
+            for token in store.load_tokens()
+            if not token.revoked and token.expires_at > now and token.room_id in actors_by_id
+        )
+        self.tokens.restore(records)
+        for record in records:
+            if record.actor_type != "display":
+                continue
+            actor = actors_by_id[record.room_id]
+            actor.display_token_digest = record.token_digest
+            actor.display_session_id = record.session_id
+
+    def _new_actor(
+        self,
+        *,
+        room_id: UUID,
+        room_code: str,
+        seed: int,
+        expires_at: datetime,
+        last_activity_at: datetime,
+    ) -> RoomActor:
+        return RoomActor(
+            room_id=room_id,
+            room_code=room_code,
+            seed=seed,
+            clock=self.clock,
+            expires_at=expires_at,
+            last_activity_at=last_activity_at,
+            uuid_source=self._uuid_source,
+            activity_sink=(self._persist_room_activity if self.store is not None else None),
+        )
+
+    @staticmethod
+    def _token_record(token: PersistedToken) -> TokenRecord:
+        return TokenRecord(
+            token_digest=token.token_digest,
+            room_id=token.room_id,
+            actor_type=token.actor_type,
+            seat_id=token.seat_id,
+            session_id=token.session_id,
+            issued_at=token.issued_at,
+            expires_at=token.expires_at,
+        )
+
+    @staticmethod
+    def _persisted_room(actor: RoomActor) -> PersistedRoom:
+        return PersistedRoom(
+            room_code=actor.room_code,
+            room_id=actor.room_id,
+            seed=actor.core.state.seed,
+            rulepack_version=_RULEPACK_VERSION,
+            expires_at=actor.expires_at,
+            last_activity_at=actor.last_activity_at,
+        )
+
+    @staticmethod
+    def _persisted_token(record: TokenRecord, *, revoked: bool = False) -> PersistedToken:
+        return PersistedToken(
+            token_digest=record.token_digest,
+            room_id=record.room_id,
+            actor_type=record.actor_type,
+            seat_id=record.seat_id,
+            session_id=record.session_id,
+            issued_at=record.issued_at,
+            expires_at=record.expires_at,
+            revoked=revoked,
+        )
+
+    def _persist_room_activity(self, actor: RoomActor) -> None:
+        if self.store is not None:
+            self.store.save_room(self._persisted_room(actor))
+
+    def _persist_room_and_token(self, actor: RoomActor, record: TokenRecord) -> None:
+        if self.store is None:
+            return
+        with self.store.transaction():
+            self.store.save_room(self._persisted_room(actor))
+            self.store.save_token(self._persisted_token(record))
 
     def active_connection_count(self) -> int:
         return self.active_connections
@@ -1410,15 +1534,18 @@ class RoomRegistry:
         else:
             raise RuntimeError("ROOM_CODE_EXHAUSTED")
         token, expires_at = self.tokens.issue_host(room_id, ttl)
-        actor = RoomActor(
+        actor = self._new_actor(
             room_id=room_id,
             room_code=room_code,
             seed=self.seed_source(),
-            clock=self.clock,
             expires_at=expires_at,
             last_activity_at=self.clock(),
-            uuid_source=self._uuid_source,
         )
+        try:
+            self._persist_room_and_token(actor, self.tokens.resolve(token))
+        except BaseException:
+            self.tokens.remove_room(room_id)
+            raise
         self.rooms[room_code] = actor
         return CreatedRoom(
             room_id=room_id,
@@ -1442,6 +1569,7 @@ class RoomRegistry:
             seat_id,
             timedelta(hours=4),
         )
+        self._persist_room_and_token(actor, self.tokens.resolve(token))
         return JoinedRoom(
             room_id=actor.room_id,
             room_code=room_code,
@@ -1498,6 +1626,7 @@ class RoomRegistry:
                 self._display_pairings.pop(room.room_id, None)
             raise ValueError("TOKEN_INVALID")
         self._display_pairings.pop(room.room_id, None)
+        previous_display = self.tokens.display_record(room.room_id)
         raw, expires_at = self.tokens.issue_display(
             room.room_id,
             timedelta(hours=1),
@@ -1507,14 +1636,25 @@ class RoomRegistry:
         assert record is not None and record.session_id is not None
         room.display_session_id = record.session_id
         room.display_token_digest = self.tokens.digest(raw)
+        if self.store is not None:
+            with self.store.transaction():
+                if previous_display is not None:
+                    self.store.save_token(self._persisted_token(previous_display, revoked=True))
+                self.store.save_token(self._persisted_token(record))
+                self.store.save_room(self._persisted_room(room))
         room.sync_display_session()
         return room.room_id, raw, expires_at
 
     def revoke_display(self, room_code: str) -> None:
         room = self.get_by_code(room_code)
+        record = self.tokens.display_record(room.room_id)
         self.tokens.revoke_display(room.room_id)
         room.display_token_digest = None
         room.display_session_id = None
+        if self.store is not None and record is not None:
+            with self.store.transaction():
+                self.store.save_token(self._persisted_token(record, revoked=True))
+                self.store.save_room(self._persisted_room(room))
         room.sync_display_session()
 
     async def start_room(self, room_code: str) -> None:
@@ -1532,6 +1672,8 @@ class RoomRegistry:
                     if key[0] == actor.room_id:
                         del self._pairing_attempts[key]
                 self.tokens.remove_room(actor.room_id)
+                if self.store is not None:
+                    self.store.delete_room(actor.room_id)
 
     async def reap_expired(self) -> int:
         now = self.clock()

@@ -1,5 +1,7 @@
 import asyncio
+import hashlib
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import UUID
 
 import pytest
@@ -11,6 +13,7 @@ from werewolf_dm.application.rooms import (
     SequenceTokenSource,
     TokenService,
 )
+from werewolf_dm.infrastructure.persistence import SQLiteRoomStore
 
 
 class CountingClock:
@@ -68,6 +71,239 @@ def test_create_room_returns_unique_code_and_host_token() -> None:
     record = registry.tokens.resolve(created.host_token)
     assert record.issued_at == now
     assert record.expires_at == created.expires_at
+
+
+def test_created_room_and_host_token_survive_registry_reopen(tmp_path: Path) -> None:
+    now = datetime(2026, 9, 24, tzinfo=UTC)
+    database_path = tmp_path / "rooms.sqlite3"
+    store = SQLiteRoomStore(database_path)
+    store.migrate()
+    registry = RoomRegistry(
+        clock=FrozenClock(now),
+        token_source=SequenceTokenSource(
+            tokens=("host-token",),
+            room_codes=("ROOM01",),
+        ),
+        seed_source=lambda: 101,
+        store=store,
+    )
+    created = registry.create_room(timedelta(hours=6))
+    store.close()
+
+    reopened_store = SQLiteRoomStore(database_path)
+    reopened_store.migrate()
+    reopened = RoomRegistry(
+        clock=FrozenClock(now),
+        token_source=SequenceTokenSource(tokens=(), room_codes=()),
+        seed_source=lambda: 999,
+        store=reopened_store,
+    )
+
+    actor = reopened.get_by_code(created.room_code)
+    record = reopened.tokens.resolve(created.host_token)
+    assert actor.room_id == created.room_id
+    assert actor.core.state.seed == 101
+    assert record.actor_type == "host"
+    assert record.expires_at == created.expires_at
+    assert created.host_token.encode() not in database_path.read_bytes()
+    assert hashlib.sha256(created.host_token.encode()).hexdigest().encode() in (
+        database_path.read_bytes()
+    )
+    reopened_store.close()
+
+
+def test_issued_seat_token_digest_survives_registry_reopen(tmp_path: Path) -> None:
+    now = datetime(2026, 9, 24, tzinfo=UTC)
+    database_path = tmp_path / "rooms.sqlite3"
+    store = SQLiteRoomStore(database_path)
+    store.migrate()
+    registry = RoomRegistry(
+        clock=FrozenClock(now),
+        token_source=SequenceTokenSource(
+            tokens=("host-token", "seat-token"),
+            room_codes=("ROOM01",),
+        ),
+        seed_source=lambda: 101,
+        store=store,
+    )
+    created = registry.create_room(timedelta(hours=6))
+    joined = registry.join_room(created.room_code, display_name="Alpha")
+    store.close()
+
+    reopened_store = SQLiteRoomStore(database_path)
+    reopened_store.migrate()
+    reopened = RoomRegistry(
+        clock=FrozenClock(now),
+        token_source=SequenceTokenSource(tokens=(), room_codes=()),
+        seed_source=lambda: 999,
+        store=reopened_store,
+    )
+
+    record = reopened.tokens.resolve(joined.seat_token)
+    assert record.actor_type == "seat"
+    assert record.room_id == created.room_id
+    assert record.seat_id == 1
+    assert reopened.tokens.active_seat_ids(created.room_id) == {1}
+    reopened_store.close()
+
+
+def test_expired_room_is_not_loaded_after_restart(tmp_path: Path) -> None:
+    now = datetime(2026, 9, 24, tzinfo=UTC)
+    database_path = tmp_path / "rooms.sqlite3"
+    store = SQLiteRoomStore(database_path)
+    store.migrate()
+    clock = FrozenClock(now)
+    registry = RoomRegistry(
+        clock=clock,
+        token_source=SequenceTokenSource(tokens=("host-token",), room_codes=("ROOM01",)),
+        seed_source=lambda: 101,
+        store=store,
+    )
+    created = registry.create_room(timedelta(hours=1))
+    clock.set(now + timedelta(hours=2))
+    store.close()
+
+    reopened_store = SQLiteRoomStore(database_path)
+    reopened_store.migrate()
+    reopened = RoomRegistry(
+        clock=clock,
+        token_source=SequenceTokenSource(tokens=(), room_codes=()),
+        seed_source=lambda: 999,
+        store=reopened_store,
+    )
+
+    assert reopened.rooms == {}
+    with pytest.raises(ValueError, match="ROOM_NOT_FOUND"):
+        reopened.get_by_code(created.room_code)
+    with pytest.raises(ValueError, match="TOKEN_INVALID"):
+        reopened.tokens.resolve(created.host_token)
+    reopened_store.close()
+
+
+def test_expired_token_is_not_loaded_after_restart(tmp_path: Path) -> None:
+    now = datetime(2026, 9, 24, tzinfo=UTC)
+    database_path = tmp_path / "rooms.sqlite3"
+    store = SQLiteRoomStore(database_path)
+    store.migrate()
+    clock = FrozenClock(now)
+    registry = RoomRegistry(
+        clock=clock,
+        token_source=SequenceTokenSource(
+            tokens=("host-token", "seat-token"),
+            room_codes=("ROOM01",),
+        ),
+        seed_source=lambda: 101,
+        store=store,
+    )
+    created = registry.create_room(timedelta(hours=6))
+    joined = registry.join_room(created.room_code, display_name="Alpha")
+    clock.set(now + timedelta(hours=5))
+    store.close()
+
+    reopened_store = SQLiteRoomStore(database_path)
+    reopened_store.migrate()
+    reopened = RoomRegistry(
+        clock=clock,
+        token_source=SequenceTokenSource(tokens=(), room_codes=()),
+        seed_source=lambda: 999,
+        store=reopened_store,
+    )
+
+    assert reopened.get_by_code(created.room_code).room_id == created.room_id
+    assert reopened.tokens.resolve(created.host_token).actor_type == "host"
+    with pytest.raises(ValueError, match="TOKEN_INVALID"):
+        reopened.tokens.resolve(joined.seat_token)
+    assert reopened.tokens.active_seat_ids(created.room_id) == set()
+    reopened_store.close()
+
+
+def test_room_activity_refresh_survives_registry_reopen(tmp_path: Path) -> None:
+    now = datetime(2026, 9, 24, tzinfo=UTC)
+    database_path = tmp_path / "rooms.sqlite3"
+    store = SQLiteRoomStore(database_path)
+    store.migrate()
+    clock = FrozenClock(now)
+    registry = RoomRegistry(
+        clock=clock,
+        token_source=SequenceTokenSource(tokens=("host-token",), room_codes=("ROOM01",)),
+        seed_source=lambda: 101,
+        store=store,
+    )
+    created = registry.create_room(timedelta(hours=6))
+    refreshed_at = now + timedelta(hours=1)
+    clock.set(refreshed_at)
+    registry.get_by_code(created.room_code).touch()
+    store.close()
+
+    reopened_store = SQLiteRoomStore(database_path)
+    reopened_store.migrate()
+    reopened = RoomRegistry(
+        clock=clock,
+        token_source=SequenceTokenSource(tokens=(), room_codes=()),
+        seed_source=lambda: 999,
+        store=reopened_store,
+    )
+
+    assert reopened.get_by_code(created.room_code).last_activity_at == refreshed_at
+    reopened_store.close()
+
+
+def test_display_token_metadata_and_revoke_survive_registry_reopen(tmp_path: Path) -> None:
+    now = datetime(2026, 9, 24, tzinfo=UTC)
+    database_path = tmp_path / "rooms.sqlite3"
+    store = SQLiteRoomStore(database_path)
+    store.migrate()
+    registry = RoomRegistry(
+        clock=FrozenClock(now),
+        token_source=SequenceTokenSource(
+            tokens=("host-token", "display-token"),
+            room_codes=("ROOM01",),
+        ),
+        seed_source=lambda: 101,
+        store=store,
+    )
+    created = registry.create_room(timedelta(hours=6))
+    pairing_code, _, _ = registry.create_display_pairing(created.room_code)
+    _, display_token, _ = registry.exchange_display_pairing(
+        created.room_code,
+        pairing_code,
+        source="127.0.0.1",
+    )
+    display_record = registry.tokens.resolve(display_token)
+    store.close()
+
+    reopened_store = SQLiteRoomStore(database_path)
+    reopened_store.migrate()
+    reopened = RoomRegistry(
+        clock=FrozenClock(now),
+        token_source=SequenceTokenSource(tokens=(), room_codes=()),
+        seed_source=lambda: 999,
+        store=reopened_store,
+    )
+    restored_actor = reopened.get_by_code(created.room_code)
+
+    assert reopened.tokens.resolve(display_token).session_id == display_record.session_id
+    assert restored_actor.display_token_digest == TokenService.digest(display_token)
+    assert restored_actor.display_session_id == display_record.session_id
+
+    reopened.revoke_display(created.room_code)
+    reopened_store.close()
+
+    revoked_store = SQLiteRoomStore(database_path)
+    revoked_store.migrate()
+    revoked = RoomRegistry(
+        clock=FrozenClock(now),
+        token_source=SequenceTokenSource(tokens=(), room_codes=()),
+        seed_source=lambda: 999,
+        store=revoked_store,
+    )
+    revoked_actor = revoked.get_by_code(created.room_code)
+
+    with pytest.raises(ValueError, match="TOKEN_INVALID"):
+        revoked.tokens.resolve(display_token)
+    assert revoked_actor.display_token_digest is None
+    assert revoked_actor.display_session_id is None
+    revoked_store.close()
 
 
 @pytest.mark.asyncio
@@ -378,3 +614,28 @@ async def test_remove_room_cleans_tokens_after_cancel() -> None:
 
     with pytest.raises(ValueError, match="TOKEN_INVALID"):
         registry.tokens.resolve(created.host_token)
+
+
+@pytest.mark.asyncio
+async def test_remove_room_deletes_room_state_and_tokens(tmp_path: Path) -> None:
+    store = SQLiteRoomStore(tmp_path / "rooms.sqlite3")
+    store.migrate()
+    registry = RoomRegistry(
+        clock=FrozenClock(datetime(2026, 9, 24, tzinfo=UTC)),
+        token_source=SequenceTokenSource(
+            tokens=("host", "seat"),
+            room_codes=("ROOM01",),
+        ),
+        seed_source=lambda: 101,
+        store=store,
+    )
+    created = registry.create_room(timedelta(hours=6))
+    registry.join_room(created.room_code, display_name="Alpha")
+
+    await registry.remove_room(created.room_code)
+
+    assert store.load_rooms() == ()
+    assert store.load_tokens() == ()
+    with pytest.raises(ValueError, match="TOKEN_INVALID"):
+        registry.tokens.resolve(created.host_token)
+    store.close()

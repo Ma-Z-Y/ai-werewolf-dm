@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import secrets
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from time import perf_counter
 from typing import Protocol
 from uuid import UUID, uuid4
@@ -15,6 +17,7 @@ from werewolf_dm.application.core import Clock
 from werewolf_dm.application.rooms import RoomRegistry, SecretsTokenSource
 from werewolf_dm.domain.contracts import ActorType
 from werewolf_dm.domain.model import StrictModel
+from werewolf_dm.infrastructure.persistence import SQLiteRoomStore
 from werewolf_dm.interfaces.http_ws.metrics import LatencyRecorder
 
 logger = logging.getLogger(__name__)
@@ -28,12 +31,32 @@ class RealClock:
         del now
 
 
+def _default_database_path() -> Path:
+    return Path(__file__).resolve().parents[4] / "data" / "werewolf_dm.sqlite3"
+
+
+def _database_path() -> Path:
+    configured = os.environ.get("WEREWOLF_DM_DB_PATH")
+    if configured:
+        return Path(configured).expanduser()
+    return _default_database_path()
+
+
 def build_production_registry() -> RoomRegistry:
-    return RoomRegistry(
-        clock=RealClock(),
-        token_source=SecretsTokenSource(),
-        seed_source=lambda: secrets.randbits(63),
-    )
+    database_path = _database_path()
+    database_path.parent.mkdir(parents=True, exist_ok=True)
+    store = SQLiteRoomStore(database_path)
+    try:
+        store.migrate()
+        return RoomRegistry(
+            clock=RealClock(),
+            token_source=SecretsTokenSource(),
+            seed_source=lambda: secrets.randbits(63),
+            store=store,
+        )
+    except BaseException:
+        store.close()
+        raise
 
 
 async def reap_periodically(

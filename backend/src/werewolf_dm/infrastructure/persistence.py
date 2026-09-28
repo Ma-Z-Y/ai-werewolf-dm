@@ -367,6 +367,9 @@ class SQLiteRoomStore:
         )
         return tuple(self._load_token_row(row) for row in rows)
 
+    def delete_room(self, room_id: UUID) -> None:
+        self._write(lambda connection: self._delete_room(connection, room_id))
+
     def save_core(
         self,
         room_id: UUID,
@@ -683,6 +686,15 @@ class SQLiteRoomStore:
                 "revoked": bool(row["revoked"]),
             },
             strict=True,
+        )
+
+    def _delete_room(self, connection: sqlite3.Connection, room_id: UUID) -> None:
+        connection.execute(
+            """
+            DELETE FROM rooms
+            WHERE room_id = ?
+            """,
+            (str(room_id),),
         )
 
     def _save_core(
