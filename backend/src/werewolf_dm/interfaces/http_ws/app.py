@@ -73,8 +73,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if owns_registry:
             registry = cast(RoomRegistry, app.state.room_registry)
             try:
-                for room_code in tuple(registry.rooms):
-                    await registry.remove_room(room_code)
+                await registry.close(close_store=True)
             finally:
                 app.state.room_registry = None
 

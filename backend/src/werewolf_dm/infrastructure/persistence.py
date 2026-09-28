@@ -44,6 +44,24 @@ class CommandDedupeKey(StrictModel):
     actor_key: str = Field(min_length=1)
 
 
+class PersistedDMTrace(StrictModel):
+    trace_kind: DMTraceKind
+    trace: DMTraceRecord
+
+
+class PersistedAdmission(StrictModel):
+    domain_seq: int = Field(ge=1)
+    message_id: UUID
+    transport_seq: int = Field(ge=0)
+    recovery_epoch: int = Field(ge=0)
+
+
+class PersistedPublication(StrictModel):
+    transport_seq: int = Field(ge=0)
+    message_id: UUID
+    recovery_epoch: int = Field(ge=0)
+
+
 class PersistedRoom(StrictModel):
     room_code: str = Field(min_length=1)
     room_id: UUID

@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
@@ -104,22 +105,29 @@ def test_create_app_lifespan_injects_production_registry_only_when_missing() -> 
         assert provided_app.state.room_registry is provided
 
 
-def test_create_app_lifespan_recreates_owned_registry_and_preserves_injected() -> None:
+def test_create_app_lifespan_closes_store_without_deleting_rooms(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WEREWOLF_DM_DB_PATH", str(tmp_path / "lifespan.sqlite3"))
     owned_app = create_app()
 
     with TestClient(owned_app) as client:
         first_registry = cast(RoomRegistry, owned_app.state.room_registry)
         created = client.post("/rooms", json={"display_name": "Host"})
         assert created.status_code == 201
-        assert first_registry.rooms
+        room_code = created.json()["room_code"]
+        assert room_code in first_registry.rooms
 
-    assert first_registry.rooms == {}
+    assert room_code in first_registry.rooms
+    assert first_registry.store is not None
+    assert first_registry.store._connection is None
     assert owned_app.state.room_registry is None
 
     with TestClient(owned_app) as client:
         second_registry = cast(RoomRegistry, owned_app.state.room_registry)
         assert second_registry is not first_registry
-        assert second_registry.rooms == {}
+        assert room_code in second_registry.rooms
         assert client.get("/healthz").status_code == 200
 
     provided = make_registry()

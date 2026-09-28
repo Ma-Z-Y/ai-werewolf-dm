@@ -1,21 +1,37 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import UUID, uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 
-from tests.factories import Scenario, core_at_wolf
+from tests.factories import Scenario, core_at_role_reveal, core_at_wolf
 from werewolf_dm.application.core import FrozenClock
-from werewolf_dm.application.rooms import RoomActor, RoomRegistry, SequenceTokenSource
+from werewolf_dm.application.dm_contracts import DMTraceRecord
+from werewolf_dm.application.rooms import (
+    RoomActor,
+    RoomRegistry,
+    SequenceTokenSource,
+    SubmitCommandEvent,
+)
 from werewolf_dm.domain.contracts import (
     AuthenticatedActor,
     CommandEnvelope,
     HostPauseCommand,
+)
+from werewolf_dm.domain.replay import state_hash
+from werewolf_dm.domain.visibility import project_public_view, project_seat_view
+from werewolf_dm.infrastructure.persistence import (
+    PersistedRoomRuntime,
+    SQLiteRoomStore,
 )
 from werewolf_dm.interfaces.http_ws.app import create_app
 
@@ -54,6 +70,59 @@ def _register_actor(
     )
     registry.rooms[room_code] = actor
     return actor
+
+
+def _open_registry(
+    database_path: Path,
+    *,
+    now: datetime = _START,
+    tokens: tuple[str, ...] = (),
+    room_codes: tuple[str, ...] = (),
+    uuid_source=None,
+) -> tuple[SQLiteRoomStore, RoomRegistry]:
+    store = SQLiteRoomStore(database_path)
+    store.migrate()
+    registry = RoomRegistry(
+        clock=FrozenClock(now),
+        token_source=SequenceTokenSource(tokens=tokens, room_codes=room_codes),
+        seed_source=lambda: 101,
+        uuid_source=uuid_source or uuid4,
+        store=store,
+    )
+    return store, registry
+
+
+def _host(room_id: UUID) -> AuthenticatedActor:
+    return AuthenticatedActor(actor_type="host", seat_id=None, room_id=room_id)
+
+
+async def _start_submit_stop(
+    actor: RoomActor,
+    envelope: CommandEnvelope,
+    authenticated: AuthenticatedActor,
+):
+    await actor.start()
+    try:
+        return await actor.submit_command(envelope, authenticated)
+    finally:
+        await actor.stop()
+
+
+class RecordingSubscriber:
+    def __init__(self) -> None:
+        self.subscription_id = uuid4()
+        self.actor_type = "host"
+        self.seat_id = None
+        self.session_id = None
+        self.channels = frozenset({"public", "host.control"})
+        self.messages: list[object] = []
+
+    def offer(self, message: object) -> bool:
+        self.messages.append(message)
+        return True
+
+    def request_close(self, code: int) -> None:
+        del code
 
 
 @contextmanager
@@ -304,3 +373,385 @@ def test_exports_omit_tokens_digests_and_raw_exception_material() -> None:
     assert "RAW-EXCEPTION-SENTINEL" not in invalid_token.text
     assert "Traceback" not in invalid_token.text
     assert "RuntimeError" not in invalid_token.text
+
+
+def test_registry_restart_restores_views_and_command_dedupe(tmp_path: Path) -> None:
+    database_path = tmp_path / "restore.sqlite3"
+    store, registry = _open_registry(
+        database_path,
+        tokens=(_HOST_TOKEN, _SEAT_TOKEN),
+        room_codes=(_ROOM_CODE,),
+    )
+    created = registry.create_room(_TOKEN_TTL)
+    joined = registry.join_room(created.room_code, display_name="Alice")
+    actor = registry.get_by_code(created.room_code)
+    envelope = CommandEnvelope(
+        command_id=uuid4(),
+        room_id=created.room_id,
+        expected_revision=actor.core.state.revision,
+        issued_at=_START,
+        payload=HostPauseCommand(reason="restart"),
+    )
+    result = asyncio.run(_start_submit_stop(actor, envelope, _host(created.room_id)))
+    state_before = actor.core.state
+    events_before = actor.core.events
+    store.close()
+
+    reopened_store, reopened = _open_registry(database_path)
+    restored = reopened.get_by_code(created.room_code)
+
+    assert restored.core.state == state_before
+    assert restored.core.events == events_before
+    assert state_hash(restored.core.state) == state_hash(state_before)
+    assert project_public_view(restored.core.state).paused is True
+    seat_view = project_seat_view(
+        restored.core.state,
+        1,
+        AuthenticatedActor(actor_type="seat", seat_id=1, room_id=created.room_id),
+    )
+    assert seat_view.room_id == created.room_id
+    assert reopened.tokens.resolve(joined.seat_token).seat_id == 1
+
+    deduped = asyncio.run(
+        _start_submit_stop(
+            restored,
+            envelope,
+            _host(created.room_id),
+        )
+    )
+
+    assert deduped.command_id == result.command_id
+    assert deduped.accepted is result.accepted
+    assert deduped.revision == result.revision
+    assert deduped == result
+    assert restored.core.state == state_before
+    assert restored.core.events == events_before
+    reopened_store.close()
+
+
+def test_restart_preserves_outbox_admission_and_audit_trace(tmp_path: Path) -> None:
+    database_path = tmp_path / "admission.sqlite3"
+    scenario = core_at_wolf()
+    room_id = scenario.core.state.room_id
+    store, registry = _open_registry(
+        database_path,
+        tokens=(_HOST_TOKEN,),
+        room_codes=(_ROOM_CODE,),
+        uuid_source=lambda: room_id,
+    )
+    created = registry.create_room(_TOKEN_TTL)
+    actor = registry.get_by_code(created.room_code)
+    actor.core = scenario.core
+    store.save_core(room_id, actor.core.state, actor.core.events)
+    outbox_seqs = tuple(item.seq for item in actor.core.state.outbox)
+    assert outbox_seqs
+    trace = DMTraceRecord(
+        trace_id=uuid4(),
+        intent_id=uuid4(),
+        template_variant_id="public.phase.notice.neutral",
+        catalog_version="s4-template-v1",
+        source_event_ids=(actor.core.events[-1].event_id,),
+        channel="public",
+        audience_seat_ids=(),
+        admission_status="admitted",
+        elapsed_ms=3,
+    )
+    transport_trace = trace.model_copy(
+        update={
+            "trace_id": uuid4(),
+            "admission_status": "suppressed",
+            "suppress_reason": "transport_failed",
+        }
+    )
+    persisted_outbox_seq = 7
+    restored_runtime = PersistedRoomRuntime(
+        outbox_seq=persisted_outbox_seq,
+        domain_to_transport={seq: index for index, seq in enumerate(outbox_seqs, start=1)},
+        completed_domain_seqs=outbox_seqs,
+        processed_announcement_seq=max(outbox_seqs),
+        published_message_ids=(uuid4(),),
+        next_domain_seq=max(outbox_seqs) + 1,
+        recovery_epoch=9,
+        discarded_command_tombstones=(),
+    )
+    store.save_room_runtime(room_id, restored_runtime)
+    store.save_dm_trace(room_id, "DM_TRACE", trace)
+    store.save_dm_trace(room_id, "DM_TRANSPORT_TRACE", transport_trace)
+    store.close()
+
+    reopened_store, reopened = _open_registry(database_path)
+    restored = reopened.get_by_code(created.room_code)
+    before_seq = restored.outbox_seq
+    before_processed = restored.processed_announcement_seq
+    before_mapping = dict(restored.domain_to_transport)
+
+    asyncio.run(restored.consume_announcements())
+
+    assert restored.outbox_seq == before_seq == persisted_outbox_seq
+    assert restored.processed_announcement_seq == before_processed == max(outbox_seqs)
+    assert dict(restored.domain_to_transport) == before_mapping
+    assert restored.dm_trace == [trace]
+    assert restored.dm_transport_trace == [transport_trace]
+    assert restored.recovery_epoch == 9
+
+    pause = CommandEnvelope(
+        command_id=uuid4(),
+        room_id=room_id,
+        expected_revision=restored.core.state.revision,
+        issued_at=_START,
+        payload=HostPauseCommand(reason="after restart"),
+    )
+    ack = asyncio.run(_start_submit_stop(restored, pause, _host(room_id)))
+
+    assert ack.accepted is True
+    assert restored.outbox_seq > persisted_outbox_seq
+
+    with TestClient(create_app(reopened), raise_server_exceptions=False) as client:
+        response = client.get(
+            f"/rooms/{_ROOM_CODE}/audit?include=dm_trace",
+            headers=_authorization(_HOST_TOKEN),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["dm_trace"][0]["trace_id"] == str(trace.trace_id)
+    reopened_store.close()
+
+
+def test_stale_epoch_submit_is_rejected_without_mutation(
+    tmp_path: Path,
+) -> None:
+    actor = RoomActor(
+        room_id=UUID(int=701),
+        room_code="ROOM01",
+        seed=101,
+        clock=FrozenClock(_START),
+        expires_at=_START + _TOKEN_TTL,
+        last_activity_at=_START,
+    )
+    before_state = actor.core.state
+    before_events = actor.core.events
+    actor.outbox_seq = 5
+    envelope = CommandEnvelope(
+        command_id=uuid4(),
+        room_id=actor.room_id,
+        expected_revision=before_state.revision,
+        issued_at=_START,
+        payload=HostPauseCommand(reason="stale"),
+    )
+
+    async def scenario() -> None:
+        await actor.start()
+        actor.recovery_epoch = 2
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
+        await actor.events.put(
+            SubmitCommandEvent(
+                envelope=envelope,
+                actor=_host(actor.room_id),
+                result=future,
+                recovery_epoch=1,
+            )
+        )
+        ack = await future
+        assert ack.accepted is False
+        assert ack.error_code == "COMMAND_VOIDED_BY_REWIND"
+        assert ack.outbox_seq == 5
+        await actor.stop()
+
+    asyncio.run(scenario())
+
+    assert actor.core.state == before_state
+    assert actor.core.events == before_events
+
+
+def test_submit_rollback_keeps_memory_state_events_dedupe_and_allocator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, registry = _open_registry(
+        tmp_path / "submit-rollback.sqlite3",
+        tokens=(_HOST_TOKEN,),
+        room_codes=(_ROOM_CODE,),
+    )
+    created = registry.create_room(_TOKEN_TTL)
+    actor = registry.get_by_code(created.room_code)
+    before_state = actor.core.state
+    before_events = actor.core.events
+    before_cache = dict(actor.core.command_dedupe_cache)
+    before_outbox = actor.outbox_seq
+    before_watermark = actor.domain_seq_allocator.current()
+    envelope = CommandEnvelope(
+        command_id=uuid4(),
+        room_id=created.room_id,
+        expected_revision=before_state.revision,
+        issued_at=_START,
+        payload=HostPauseCommand(reason="rollback"),
+    )
+
+    def fail_save_core(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise RuntimeError("save core failed")
+
+    monkeypatch.setattr(store, "save_core", fail_save_core)
+
+    async def scenario() -> None:
+        await actor.start()
+        with pytest.raises(RuntimeError, match="save core failed"):
+            await actor.submit_command(envelope, _host(created.room_id))
+
+    asyncio.run(scenario())
+
+    assert actor.core.state == before_state
+    assert actor.core.events == before_events
+    assert actor.core.command_dedupe_cache == before_cache
+    assert actor.outbox_seq == before_outbox
+    assert actor.domain_seq_allocator.current() == before_watermark
+    store.close()
+
+
+def test_tick_rollback_keeps_timer_state_events_and_outbox(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core = core_at_role_reveal()
+    room_id = core.state.room_id
+    store, registry = _open_registry(
+        tmp_path / "tick-rollback.sqlite3",
+        tokens=(_HOST_TOKEN,),
+        room_codes=(_ROOM_CODE,),
+        uuid_source=lambda: room_id,
+    )
+    created = registry.create_room(_TOKEN_TTL)
+    actor = registry.get_by_code(created.room_code)
+    actor.core = core
+    store.save_core(room_id, actor.core.state, actor.core.events)
+    before_state = actor.core.state
+    before_events = actor.core.events
+    before_outbox = actor.outbox_seq
+    before_watermark = actor.domain_seq_allocator.current()
+    assert before_state.deadline_at is not None
+
+    def fail_save_core(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise RuntimeError("save core failed")
+
+    monkeypatch.setattr(store, "save_core", fail_save_core)
+
+    async def scenario_run() -> None:
+        await actor.start()
+        clock = actor.clock
+        assert before_state.deadline_at is not None
+        clock.set(before_state.deadline_at)
+        actor.core.clock.set(before_state.deadline_at)
+        await actor.enqueue_timer_tick(
+            revision=before_state.revision,
+            deadline_at=before_state.deadline_at,
+            now=before_state.deadline_at,
+        )
+        with pytest.raises(RuntimeError, match="save core failed"):
+            await actor.attach_subscriber(RecordingSubscriber())
+
+    asyncio.run(scenario_run())
+
+    assert actor.core.state == before_state
+    assert actor.core.events == before_events
+    assert actor.outbox_seq == before_outbox
+    assert actor.domain_seq_allocator.current() == before_watermark
+    store.close()
+
+
+def test_announcement_rollback_keeps_completed_processed_and_outbox(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = core_at_wolf()
+    store, registry = _open_registry(
+        tmp_path / "announcement-rollback.sqlite3",
+        tokens=(_HOST_TOKEN,),
+        room_codes=(_ROOM_CODE,),
+        uuid_source=lambda: scenario.core.state.room_id,
+    )
+    created = registry.create_room(_TOKEN_TTL)
+    actor = registry.get_by_code(created.room_code)
+    actor.core = scenario.core
+    before_completed = set(actor._completed_domain_seqs)
+    before_processed = actor.processed_announcement_seq
+    before_outbox = actor.outbox_seq
+    before_traces = list(actor.dm_trace)
+
+    def fail_save_runtime(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise RuntimeError("save runtime failed")
+
+    monkeypatch.setattr(store, "save_room_runtime", fail_save_runtime)
+
+    async def scenario_run() -> None:
+        with pytest.raises(RuntimeError, match="save runtime failed"):
+            await actor.consume_announcements()
+
+    asyncio.run(scenario_run())
+
+    assert actor._completed_domain_seqs == before_completed
+    assert actor.processed_announcement_seq == before_processed
+    assert actor.outbox_seq == before_outbox
+    assert actor.dm_trace == before_traces
+    store.close()
+
+
+def test_publish_rollback_keeps_transport_sequence_and_subscribers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, registry = _open_registry(
+        tmp_path / "publish-rollback.sqlite3",
+        tokens=(_HOST_TOKEN,),
+        room_codes=(_ROOM_CODE,),
+    )
+    created = registry.create_room(_TOKEN_TTL)
+    actor = registry.get_by_code(created.room_code)
+    subscriber = RecordingSubscriber()
+    actor.subscribers[subscriber.subscription_id] = subscriber
+
+    def fail_save_runtime(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise RuntimeError("save runtime failed")
+
+    monkeypatch.setattr(store, "save_room_runtime", fail_save_runtime)
+
+    with pytest.raises(RuntimeError, match="save runtime failed"):
+        actor._publish_updates()
+
+    assert actor.outbox_seq == 0
+    assert subscriber.messages == []
+    store.close()
+
+
+def test_registry_restart_skips_corrupt_room_without_blocking_other_rooms(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "corrupt-room.sqlite3"
+    room_ids = iter((UUID(int=501), UUID(int=502)))
+    store, registry = _open_registry(
+        database_path,
+        tokens=("host-one", "host-two"),
+        room_codes=("ROOM01", "ROOM02"),
+        uuid_source=lambda: next(room_ids),
+    )
+    corrupt = registry.create_room(_TOKEN_TTL)
+    healthy = registry.create_room(_TOKEN_TTL)
+    store.close()
+
+    connection = sqlite3.connect(database_path)
+    try:
+        connection.execute(
+            "UPDATE rooms SET state_json = ? WHERE room_code = ?",
+            ("{", corrupt.room_code),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    reopened_store, reopened = _open_registry(database_path)
+
+    assert healthy.room_code in reopened.rooms
+    assert corrupt.room_code not in reopened.rooms
+    reopened_store.close()
