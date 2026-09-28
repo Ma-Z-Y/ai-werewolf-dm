@@ -12,7 +12,7 @@ import pytest
 from websockets.sync.client import ClientConnection
 
 from tests.conftest import _core_with_wolf_win
-from tests.factories import ROOM_ID
+from tests.factories import ROOM_ID, core_at_wolf
 from tests.integration.http_ws.test_s4_outbox import EmptyRegistry, _actor
 from tests.integration.http_ws.test_six_client_flow import (
     make_registry as make_six_client_registry,
@@ -134,6 +134,82 @@ async def test_lat_004_six_client_dm_message_p95_under_300ms() -> None:
     assert len(samples) == LAT004_ROUNDS * len(sockets)
     measured_p95 = _p95(samples)
     print(f"LAT-004 template six-client dm.message p95={measured_p95:.3f}ms samples={len(samples)}")
+    assert measured_p95 < 300
+
+
+@pytest.mark.asyncio
+@pytest.mark.latency
+async def test_lat_004_production_seat_prompt_p95_under_300ms() -> None:
+    registry = make_six_client_registry()
+    with patch("werewolf_dm.application.rooms.uuid4", return_value=ROOM_ID):
+        created = registry.create_room(timedelta(hours=1))
+    joined = [registry.join_room(created.room_code, f"P{seat}") for seat in range(1, 7)]
+    cores = [core_at_wolf().core for _ in range(LAT004_ROUNDS)]
+
+    with running_server(registry) as (_, loop, port):
+        cleanup = asyncio.run_coroutine_threadsafe(
+            registry.start_room(created.room_code),
+            loop,
+        )
+        cleanup.result(timeout=5)
+        room = registry.get_by_code(created.room_code)
+        with ExitStack() as stack:
+            sockets = [
+                open_authenticated_client(stack, port, joined_room.seat_token)[0]
+                for joined_room in joined
+            ]
+
+            async def replace_and_admit_seat_prompt(core: GameCore) -> DMAdmissionResult:
+                room.core = core
+                room.clock = core.clock
+                room._completed_domain_seqs.clear()
+                room._announcement_slots.clear()
+                room._announcement_candidates.clear()
+                domain_seq = min(
+                    item.seq
+                    for item in core.state.outbox
+                    if item.kind == "dm.message" and item.audience_seat_id is not None
+                )
+                return await room.consume_slot(domain_seq=domain_seq)
+
+            def receive_dm_message(
+                socket_: ClientConnection,
+                started: float,
+            ) -> tuple[float, dict[str, object]]:
+                while True:
+                    message = receive_json(socket_)
+                    if message.get("type") == "dm.message":
+                        return (perf_counter() - started) * 1000.0, message
+
+            samples: list[float] = []
+            for core in cores:
+                started = perf_counter()
+                admitted = asyncio.run_coroutine_threadsafe(
+                    replace_and_admit_seat_prompt(core),
+                    loop,
+                )
+                expected = admitted.result(timeout=5)
+                assert expected.message is not None
+                binding = expected.message.audience_bindings[0]
+                assert binding.seat_id is not None
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(
+                        receive_dm_message,
+                        sockets[binding.seat_id - 1],
+                        started,
+                    )
+                    elapsed_ms, message = future.result(timeout=5)
+                nested = message["message"]
+                assert isinstance(nested, dict)
+                assert message["outbox_seq"] == expected.transport_seq
+                assert nested["message_id"] == str(expected.message.message_id)
+                assert nested["channel"] == "seat"
+                assert nested["text"] == expected.message.text
+                samples.append(elapsed_ms)
+
+    assert len(samples) == LAT004_ROUNDS
+    measured_p95 = _p95(samples)
+    print(f"LAT-004 production seat prompt p95={measured_p95:.3f}ms samples={len(samples)}")
     assert measured_p95 < 300
 
 

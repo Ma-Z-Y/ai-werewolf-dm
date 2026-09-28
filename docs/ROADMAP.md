@@ -23,16 +23,17 @@
 - [x] S4 Template-Only AI DM：严格模板契约、确定性 renderer、
   template-only service、RoomActor ordered outbox/transport、
   metrics/trace privacy、前端 `dm.message` 隔离与真实模板延迟回归。
-  真实生产 `SEAT_PROMPT` 生成仍为 deferred，seat 浏览器证据来自
-  E2E-only injection。
+- [ ] S4-07 生产 `SEAT_PROMPT`：`RoomActor` 按当前 seat session 从夜阶段
+  outbox 投递座位提示，离线槽不阻塞后续槽，浏览器证据使用真实生产消息；
+  生产实现、真实浏览器 E2E、独立复核和交付门禁已完成；待用户最终验收。
 
 ## 下一步
 
-- [ ] 后续版本化设计生产 `SEAT_PROMPT` 生成与 provider 重入。
+- [ ] 后续版本化设计 provider/LLM 重入。
 
 每项任务只有在实现、确定性测试、独立复核和用户验收都完成后才会标记为
 完成。正式版本只会在对应阶段的验收出口通过后发布。当前 S4 本地与 CI
-基线为 backend `622 passed, 9 skipped`，latency marker 为
-`7 passed, 2 skipped`；前端单元/组件测试为 `166 passed`，Playwright
+基线为 backend `640 passed, 10 skipped`，latency marker 为
+`8 passed, 2 skipped`；前端单元/组件测试为 `166 passed`，Playwright
 浏览器测试为 `14 passed`。CI 与根交付门禁同时覆盖后端、前端和隔离的
 latency job。

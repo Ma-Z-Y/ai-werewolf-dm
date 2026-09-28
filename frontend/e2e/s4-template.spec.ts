@@ -248,18 +248,22 @@ async function completeTemplateOnlyFlow(options: {
     seerTarget: 1,
     witchAction: options.witchAction ?? "skip",
   });
-  await injectSeatDm(options.request, roomCode, 1);
   await expect
-    .poll(() => {
-      return dmMessages.some(
+    .poll(() =>
+      dmMessages.some(
         (payload) =>
           (
             payload as {
-              message: { channel: string };
+              message: { channel: string; text: string };
             }
-          ).message.channel === "seat",
-      );
-    })
+          ).message.channel === "seat" &&
+          (
+            payload as {
+              message: { text: string };
+            }
+          ).message.text === "请 1 号玩家在 女巫行动 行动。",
+      ),
+    )
     .toBe(true);
 
   return {
@@ -296,25 +300,6 @@ async function backendNetworkViolations(
   );
   expect(response.ok()).toBe(true);
   return (await response.json() as { violations: string[] }).violations;
-}
-
-async function injectSeatDm(
-  request: APIRequestContext,
-  roomCode: string,
-  seatId: number,
-): Promise<void> {
-  const response = await request.post(
-    `http://127.0.0.1:8000/__test__/rooms/${roomCode}/seat-dm`,
-    {
-      headers: controlHeaders,
-      data: { seat_id: seatId },
-    },
-  );
-  if (!response.ok()) {
-    throw new Error(
-      `injectSeatDm failed: ${response.status()} ${await response.text()}`,
-    );
-  }
 }
 
 async function runDeterministicTemplateFlow({

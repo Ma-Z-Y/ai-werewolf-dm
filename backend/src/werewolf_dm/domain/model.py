@@ -409,6 +409,13 @@ class OutboxItem(StrictModel):
     kind: Literal["dm.message", "view.updated", "game.ended"]
     event_id: UUID
     revision: int = Field(ge=0)
+    audience_seat_id: int | None = Field(default=None, ge=1, le=6)
+
+    @model_validator(mode="after")
+    def validate_audience_seat_id(self) -> Self:
+        if self.audience_seat_id is not None and self.kind != "dm.message":
+            raise ValueError("audience_seat_id is only valid for dm.message")
+        return self
 
 
 class GameState(StrictModel):

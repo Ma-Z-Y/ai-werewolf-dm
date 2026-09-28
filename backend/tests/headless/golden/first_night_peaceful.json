@@ -344,6 +344,10 @@
     "winner": null,
     "deaths": [],
     "outbox_kinds": [
+      "dm.message",
+      "dm.message",
+      "dm.message",
+      "dm.message",
       "dm.message"
     ],
     "semantic_assertions": [

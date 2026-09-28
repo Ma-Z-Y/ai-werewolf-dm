@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from tests.conftest import _core_exile_last_wolf, _core_with_wolf_win
+from tests.factories import core_at_wolf
 from werewolf_dm.application.core import FrozenClock, GameCore
 from werewolf_dm.application.dm_contracts import (
     DMAnnouncementSlot,
@@ -90,6 +91,20 @@ def _slot(
     )
 
 
+def _current_public_dm_seq(actor: RoomActor) -> int:
+    return next(
+        item.seq
+        for item in reversed(actor.core.state.outbox)
+        if item.kind == "dm.message"
+        and item.audience_seat_id is None
+        and item.revision == actor.core.state.revision
+    )
+
+
+def _game_end_seq(actor: RoomActor) -> int:
+    return next(item.seq for item in reversed(actor.core.state.outbox) if item.kind == "game.ended")
+
+
 def _seat_intent_and_facts(
     actor: RoomActor,
     *,
@@ -145,6 +160,51 @@ def _public_intent_and_facts(
 
 
 @pytest.mark.asyncio
+async def test_production_seat_prompts_conserve_domain_and_wire_sequences() -> None:
+    scenario = core_at_wolf()
+    actor = _actor(scenario.core)
+    await actor.start()
+    for seat_id in scenario.wolf_ids:
+        await actor.attach_subscriber(
+            RecordingSubscriber(
+                actor_type="seat",
+                seat_id=seat_id,
+                channels=frozenset({"public", "seat"}),
+            )
+        )
+    prompt_seqs = [
+        item.seq for item in scenario.core.state.outbox if item.audience_seat_id is not None
+    ]
+
+    await actor.consume_announcements()
+
+    assert list(actor.domain_to_transport) == prompt_seqs
+    assert list(actor.domain_to_transport.values()) == list(range(1, len(prompt_seqs) + 1))
+    assert [message.channel for message in actor.published_messages] == ["seat"] * len(prompt_seqs)
+    assert actor.client_outbox_seq == len(prompt_seqs)
+
+    await actor.stop()
+
+
+@pytest.mark.asyncio
+async def test_offline_production_seat_prompts_publish_nothing_or_trace() -> None:
+    scenario = core_at_wolf()
+    actor = _actor(scenario.core)
+    prompt_seqs = [
+        item.seq for item in scenario.core.state.outbox if item.audience_seat_id is not None
+    ]
+
+    await actor.consume_announcements()
+
+    assert prompt_seqs
+    assert actor.domain_to_transport == {}
+    assert actor.client_outbox_seq == 0
+    assert actor.published_messages == []
+    assert actor.dm_trace == []
+    assert actor.processed_announcement_seq == max(prompt_seqs)
+
+
+@pytest.mark.asyncio
 async def test_game_end_cannot_overtake_earlier_dm_slot() -> None:
     actor = _actor(_core_with_wolf_win(poison_good=False))
 
@@ -168,20 +228,22 @@ async def test_game_end_cannot_overtake_earlier_dm_slot() -> None:
 @pytest.mark.asyncio
 async def test_domain_seq_maps_to_client_outbox_seq() -> None:
     actor = _actor(_core_with_wolf_win(poison_good=False))
+    domain_seq = _current_public_dm_seq(actor)
 
-    result = await actor.consume_slot(domain_seq=3)
+    result = await actor.consume_slot(domain_seq=domain_seq)
 
     assert result.admitted is True
-    assert actor.domain_to_transport[3] == 1
+    assert actor.domain_to_transport[domain_seq] == 1
     assert actor.client_outbox_seq == 1
 
 
 @pytest.mark.asyncio
 async def test_duplicate_slot_is_not_published_twice() -> None:
     actor = _actor(_core_with_wolf_win(poison_good=False))
+    domain_seq = _current_public_dm_seq(actor)
 
-    first = await actor.consume_announcement(domain_seq=3)
-    second = await actor.consume_announcement(domain_seq=3)
+    first = await actor.consume_announcement(domain_seq=domain_seq)
+    second = await actor.consume_announcement(domain_seq=domain_seq)
 
     assert first.admitted is True
     assert second.admitted is False
@@ -194,17 +256,20 @@ async def test_duplicate_slot_is_not_published_twice() -> None:
 async def test_consume_slot_cannot_overtake_earlier_dm_slot() -> None:
     actor = _actor(_core_with_wolf_win(poison_good=False))
 
-    result = await actor.consume_slot(domain_seq=4)
+    result = await actor.consume_slot(domain_seq=_game_end_seq(actor))
 
     assert result.admitted is True
     assert actor.published_kinds == ["dm.message", "game.ended"]
-    assert list(actor.domain_to_transport) == [3, 4]
+    assert list(actor.domain_to_transport) == [
+        _current_public_dm_seq(actor),
+        _game_end_seq(actor),
+    ]
 
 
 @pytest.mark.asyncio
 async def test_admission_after_deadline_fails_closed() -> None:
     actor = _actor(_core_with_wolf_win(poison_good=False))
-    slot = _slot(actor, domain_seq=3)
+    slot = _slot(actor, domain_seq=_current_public_dm_seq(actor))
     actor.set_monotonic_now(3001)
 
     result = await actor.admit(slot)
@@ -218,7 +283,7 @@ async def test_admission_after_deadline_fails_closed() -> None:
 @pytest.mark.asyncio
 async def test_admission_at_deadline_is_allowed() -> None:
     actor = _actor(_core_with_wolf_win(poison_good=False))
-    slot = _slot(actor, domain_seq=3)
+    slot = _slot(actor, domain_seq=_current_public_dm_seq(actor))
     actor.set_monotonic_now(3000)
 
     result = await actor.admit(slot)
@@ -231,16 +296,17 @@ async def test_admission_at_deadline_is_allowed() -> None:
 @pytest.mark.asyncio
 async def test_integration_admission_after_original_deadline_fails_closed() -> None:
     actor = _actor(_core_with_wolf_win(poison_good=False))
+    domain_seq = _current_public_dm_seq(actor)
     event = next(
         event
         for event in actor.core.events
         if event.event_id
-        == next(item for item in actor.core.state.outbox if item.seq == 3).event_id
+        == next(item for item in actor.core.state.outbox if item.seq == domain_seq).event_id
     )
     actor.clock.set(event.created_at + timedelta(seconds=3))
     actor.set_monotonic_now(5000)
 
-    result = await actor.consume_slot(domain_seq=3)
+    result = await actor.consume_slot(domain_seq=domain_seq)
 
     assert result.admitted is False
     assert actor.last_trace is not None
@@ -262,10 +328,11 @@ async def test_stale_template_admission_is_suppressed(
     expected_reason: str,
 ) -> None:
     actor = _actor(_core_with_wolf_win(poison_good=False))
-    intent, facts = _public_intent_and_facts(actor, domain_seq=3)
-    slot = _slot(actor, domain_seq=3)
+    domain_seq = _current_public_dm_seq(actor)
+    intent, facts = _public_intent_and_facts(actor, domain_seq=domain_seq)
+    slot = _slot(actor, domain_seq=domain_seq)
     if stale == "revision":
-        slot = _slot(actor, domain_seq=3, revision=actor.core.state.revision + 1)
+        slot = _slot(actor, domain_seq=domain_seq, revision=actor.core.state.revision + 1)
     elif stale == "phase":
         actor.core._state = actor.core.state.model_copy(update={"phase": Phase.LOBBY})
     else:
@@ -298,10 +365,11 @@ async def test_render_failure_is_failed_closed() -> None:
 @pytest.mark.asyncio
 async def test_room_closed_is_suppressed() -> None:
     actor = _actor(_core_with_wolf_win(poison_good=False))
-    intent, facts = _public_intent_and_facts(actor, domain_seq=3)
+    domain_seq = _current_public_dm_seq(actor)
+    intent, facts = _public_intent_and_facts(actor, domain_seq=domain_seq)
     actor.closed = True
 
-    result = await actor.admit(_slot(actor, domain_seq=3), intent=intent, facts=facts)
+    result = await actor.admit(_slot(actor, domain_seq=domain_seq), intent=intent, facts=facts)
 
     assert result.admitted is False
     assert actor.last_trace is not None
@@ -324,14 +392,19 @@ async def test_seat_session_rebinding_invalidates_old_audience() -> None:
     await actor.publish_current(first)
     assert actor.seat_session_id(2) == old_session
 
+    public_seq = _current_public_dm_seq(actor)
     intent, facts = _seat_intent_and_facts(
         actor,
-        domain_seq=4,
+        domain_seq=public_seq,
         seat_id=2,
         session_id=old_session,
     )
     actor.core._state = actor.core.state.model_copy(update={"phase": Phase.NIGHT_WOLF})
-    first_result = await actor.admit(_slot(actor, domain_seq=4), intent=intent, facts=facts)
+    first_result = await actor.admit(
+        _slot(actor, domain_seq=public_seq),
+        intent=intent,
+        facts=facts,
+    )
     assert first_result.admitted is True
     assert len(actor.published_messages) == 1
     assert actor.published_messages[0].channel == "seat"
@@ -346,14 +419,15 @@ async def test_seat_session_rebinding_invalidates_old_audience() -> None:
     new_session = actor.seat_session_id(2)
     assert new_session is not None and new_session != old_session
 
+    game_end_seq = _game_end_seq(actor)
     stale_intent, stale_facts = _seat_intent_and_facts(
         actor,
-        domain_seq=5,
+        domain_seq=game_end_seq,
         seat_id=2,
         session_id=old_session,
     )
     stale_result = await actor.admit(
-        _slot(actor, domain_seq=5),
+        _slot(actor, domain_seq=game_end_seq),
         intent=stale_intent,
         facts=stale_facts,
     )
@@ -380,10 +454,11 @@ async def test_public_message_is_not_invalidated_by_seat_rebinding() -> None:
         channels=frozenset({"public", "seat"}),
     )
     await actor.attach_subscriber(second)
-    public_intent, public_facts = _public_intent_and_facts(actor, domain_seq=4)
+    domain_seq = _current_public_dm_seq(actor)
+    public_intent, public_facts = _public_intent_and_facts(actor, domain_seq=domain_seq)
 
     public_result = await actor.admit(
-        _slot(actor, domain_seq=4),
+        _slot(actor, domain_seq=domain_seq),
         intent=public_intent,
         facts=public_facts,
     )
@@ -397,10 +472,12 @@ async def test_public_message_is_not_invalidated_by_seat_rebinding() -> None:
 @pytest.mark.asyncio
 async def test_domain_transport_conservation() -> None:
     actor = _actor(_core_with_wolf_win(poison_good=False))
+    public_seq = _current_public_dm_seq(actor)
+    game_end_seq = _game_end_seq(actor)
 
     await actor.consume_announcements()
 
-    assert list(actor.domain_to_transport) == [3, 4]
+    assert list(actor.domain_to_transport) == [public_seq, game_end_seq]
     assert list(actor.domain_to_transport.values()) == [1, 2]
     assert actor.client_outbox_seq == len(actor.published_messages)
 

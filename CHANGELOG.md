@@ -42,6 +42,9 @@
 - S4 E2E 与延迟：固定 room/seed/session/catalog 字节确定性、
   六客户端同 revision 证据、暂停/重连/终局顺序，以及真实模板
   LAT-001/004/005 和独立 latency CI job。
+- S4-07 生产 `SEAT_PROMPT`：夜阶段为存活狼人、预言家和女巫生成座位槽，
+  仅向当前 seat session 投递；离线槽安全完成且不阻塞后续槽，同时删除
+  E2E-only seat-message injection。
 
 ### Security
 
@@ -54,5 +57,5 @@
 - 房间删除或过期会主动关闭已认证连接；malformed ping 和未知协议消息不会
   刷新空闲时间或绕过连接洪泛控制。
 - S4 DM 渲染继续执行 public/seat 分区；浏览器 E2E 阻断 provider 与非
-  loopback 外联。生产 `SEAT_PROMPT` 生成仍未实现，seat 浏览器证据来自
-  E2E-only injection，不代表生产能力已完成。
+  loopback 外联。生产 `SEAT_PROMPT` 已由 `RoomActor` 从领域 outbox
+  生成，浏览器证据直接消费真实 seat 消息；provider/LLM 仍未启用。

@@ -114,6 +114,11 @@ ROLE_REVEAL_SECONDS = 120
 NIGHT_WOLF_SECONDS = 60
 NIGHT_SEER_SECONDS = 30
 NIGHT_WITCH_SECONDS = 30
+_SEAT_PROMPT_ROLES: dict[Phase, Role] = {
+    Phase.NIGHT_WOLF: Role.WEREWOLF,
+    Phase.NIGHT_SEER: Role.SEER,
+    Phase.NIGHT_WITCH: Role.WITCH,
+}
 DISCUSSION_SECONDS = 45
 NORMAL_VOTE_SECONDS = 30
 PK_DISCUSSION_SECONDS = 30
@@ -359,6 +364,16 @@ def transition(
     next_state = state.model_copy(update={"phase": next_phase})
     validate_invariants(next_state)
     events.append(event)
+    prompt_role = _SEAT_PROMPT_ROLES.get(next_phase)
+    if prompt_role is not None:
+        for player in next_state.players:
+            if player.alive and player.role is prompt_role:
+                next_state = _enqueue_outbox(
+                    next_state,
+                    "dm.message",
+                    event,
+                    audience_seat_id=player.seat_id,
+                )
     return next_state
 
 
@@ -435,6 +450,8 @@ def _enqueue_outbox(
     state: GameState,
     kind: Literal["dm.message", "view.updated", "game.ended"],
     event: DomainEvent,
+    *,
+    audience_seat_id: int | None = None,
 ) -> GameState:
     seq = state.outbox[-1].seq + 1 if state.outbox else 1
     item = OutboxItem(
@@ -442,6 +459,7 @@ def _enqueue_outbox(
         kind=kind,
         event_id=event.event_id,
         revision=event.revision,
+        audience_seat_id=audience_seat_id,
     )
     return state.model_copy(update={"outbox": (*state.outbox, item)})
 
