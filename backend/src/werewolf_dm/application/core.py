@@ -114,6 +114,7 @@ class PersistenceCoordinator:
     ) -> None:
         if self.store is None:
             return
+        runtime = self._validated_runtime(runtime)
         with self.store.transaction():
             self.store.save_core(
                 room_id,
@@ -138,9 +139,10 @@ class PersistenceCoordinator:
         admissions: tuple[PersistedAdmission, ...] = (),
         publications: tuple[PersistedPublication, ...] = (),
     ) -> None:
-        self._validate_runtime_records(runtime, admissions, publications)
         if self.store is None:
             return
+        runtime = self._validated_runtime(runtime)
+        self._validate_runtime_records(runtime, admissions, publications)
         with self.store.transaction():
             self._save_traces(room_id, traces)
             self.store.save_room_runtime(room_id, runtime)
@@ -158,6 +160,19 @@ class PersistenceCoordinator:
                 persisted_trace.trace_kind,
                 persisted_trace.trace,
             )
+
+    @staticmethod
+    def _validated_runtime(runtime: PersistedRoomRuntime) -> PersistedRoomRuntime:
+        return PersistedRoomRuntime(
+            outbox_seq=runtime.outbox_seq,
+            domain_to_transport=dict(runtime.domain_to_transport),
+            completed_domain_seqs=tuple(runtime.completed_domain_seqs),
+            processed_announcement_seq=runtime.processed_announcement_seq,
+            published_message_ids=tuple(runtime.published_message_ids),
+            next_domain_seq=runtime.next_domain_seq,
+            recovery_epoch=runtime.recovery_epoch,
+            discarded_command_tombstones=tuple(runtime.discarded_command_tombstones),
+        )
 
     @staticmethod
     def _validate_runtime_records(

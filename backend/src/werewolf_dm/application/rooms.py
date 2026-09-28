@@ -1005,7 +1005,7 @@ class RoomActor:
         next_domain_seq: int | None = None,
         recovery_epoch: int | None = None,
     ) -> PersistedRoomRuntime:
-        return PersistedRoomRuntime(
+        return PersistedRoomRuntime.model_construct(
             outbox_seq=self.outbox_seq if outbox_seq is None else outbox_seq,
             domain_to_transport=(
                 dict(self.domain_to_transport)
