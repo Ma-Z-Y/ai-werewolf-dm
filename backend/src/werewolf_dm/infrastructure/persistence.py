@@ -196,7 +196,7 @@ _SCHEMA_STATEMENTS = (
     """,
     """
     CREATE TABLE IF NOT EXISTS room_events (
-        room_id TEXT NOT NULL REFERENCES rooms(room_id) ON DELETE CASCADE,
+        room_id TEXT NOT NULL,
         event_ordinal INTEGER NOT NULL,
         revision INTEGER NOT NULL,
         event_id TEXT NOT NULL,
@@ -427,7 +427,7 @@ class SQLiteRoomStore:
         loaded: dict[CommandDedupeKey, CommandResult] = {}
         for row in rows:
             key = CommandDedupeKey(
-                command_id=UUID(row["command_id"]),
+                command_id=_load_uuid(row["command_id"], "command id"),
                 actor_type=row["actor_type"],
                 actor_key=row["actor_key"],
             )
@@ -579,7 +579,15 @@ class SQLiteRoomStore:
     def _write(self, operation: Callable[[sqlite3.Connection], None]) -> None:
         connection = self._require_connection()
         if self._transaction_depth > 0:
-            operation(connection)
+            connection.execute("SAVEPOINT store_write")
+            try:
+                operation(connection)
+            except BaseException:
+                connection.execute("ROLLBACK TO SAVEPOINT store_write")
+                connection.execute("RELEASE SAVEPOINT store_write")
+                raise
+            else:
+                connection.execute("RELEASE SAVEPOINT store_write")
             return
         with self.transaction() as transaction:
             operation(transaction)
@@ -616,11 +624,11 @@ class SQLiteRoomStore:
         return PersistedRoom.model_validate(
             {
                 "room_code": row["room_code"],
-                "room_id": UUID(row["room_id"]),
+                "room_id": _load_uuid(row["room_id"], "room id"),
                 "seed": row["seed"],
                 "rulepack_version": row["rulepack_version"],
-                "expires_at": datetime.fromisoformat(row["expires_at"]),
-                "last_activity_at": datetime.fromisoformat(row["last_activity_at"]),
+                "expires_at": _load_datetime(row["expires_at"], "room expiry"),
+                "last_activity_at": _load_datetime(row["last_activity_at"], "room activity"),
             },
             strict=True,
         )
@@ -662,12 +670,16 @@ class SQLiteRoomStore:
         return PersistedToken.model_validate(
             {
                 "token_digest": row["token_digest"],
-                "room_id": UUID(row["room_id"]),
+                "room_id": _load_uuid(row["room_id"], "token room id"),
                 "actor_type": row["actor_type"],
                 "seat_id": row["seat_id"],
-                "session_id": (UUID(row["session_id"]) if row["session_id"] is not None else None),
-                "issued_at": datetime.fromisoformat(row["issued_at"]),
-                "expires_at": datetime.fromisoformat(row["expires_at"]),
+                "session_id": (
+                    _load_uuid(row["session_id"], "token session id")
+                    if row["session_id"] is not None
+                    else None
+                ),
+                "issued_at": _load_datetime(row["issued_at"], "token issue time"),
+                "expires_at": _load_datetime(row["expires_at"], "token expiry"),
                 "revoked": bool(row["revoked"]),
             },
             strict=True,
@@ -901,13 +913,13 @@ class SQLiteRoomStore:
 
     def _load_snapshot_row(self, row: sqlite3.Row) -> PersistedSnapshot:
         return PersistedSnapshot(
-            snapshot_id=UUID(row["snapshot_id"]),
-            room_id=UUID(row["room_id"]),
+            snapshot_id=_load_uuid(row["snapshot_id"], "snapshot id"),
+            room_id=_load_uuid(row["room_id"], "snapshot room id"),
             revision=row["revision"],
             reason=row["reason"],
             state=self._load_model(GameState, row["state_json"], "snapshot state"),
             event_count=row["event_count"],
-            created_at=datetime.fromisoformat(row["created_at"]),
+            created_at=_load_datetime(row["created_at"], "snapshot creation time"),
         )
 
     def _append_recovery_audit(
@@ -947,28 +959,33 @@ class SQLiteRoomStore:
         self,
         row: sqlite3.Row,
     ) -> PersistedRecoveryAudit:
-        return PersistedRecoveryAudit(
-            record_id=UUID(row["record_id"]),
-            room_id=UUID(row["room_id"]),
-            command_id=UUID(row["command_id"]),
-            status=row["status"],
-            patch_type=row["patch_type"],
-            before_revision=row["before_revision"],
-            after_revision=row["after_revision"],
-            before_state=(
-                self._load_model(GameState, row["before_state_json"], "audit before state")
-                if row["before_state_json"] is not None
-                else None
-            ),
-            after_state=(
-                self._load_model(GameState, row["after_state_json"], "audit after state")
-                if row["after_state_json"] is not None
-                else None
-            ),
-            diff=json.loads(row["diff_json"]),
-            reason=row["reason"],
-            created_at=datetime.fromisoformat(row["created_at"]),
-        )
+        try:
+            return PersistedRecoveryAudit(
+                record_id=_load_uuid(row["record_id"], "audit record id"),
+                room_id=_load_uuid(row["room_id"], "audit room id"),
+                command_id=_load_uuid(row["command_id"], "audit command id"),
+                status=row["status"],
+                patch_type=row["patch_type"],
+                before_revision=row["before_revision"],
+                after_revision=row["after_revision"],
+                before_state=(
+                    self._load_model(GameState, row["before_state_json"], "audit before state")
+                    if row["before_state_json"] is not None
+                    else None
+                ),
+                after_state=(
+                    self._load_model(GameState, row["after_state_json"], "audit after state")
+                    if row["after_state_json"] is not None
+                    else None
+                ),
+                diff=_load_json_mapping(row["diff_json"], "recovery audit diff"),
+                reason=row["reason"],
+                created_at=_load_datetime(row["created_at"], "audit creation time"),
+            )
+        except PersistenceCorruptionError:
+            raise
+        except ValueError as exc:
+            raise PersistenceCorruptionError("corrupt persisted recovery audit") from exc
 
     def _load_model(
         self,
@@ -988,6 +1005,34 @@ def _dump_model(model: BaseModel) -> str:
 
 def _dump_datetime(value: datetime) -> str:
     return cast(str, to_jsonable_python(value))
+
+
+def _load_uuid(payload: object, label: str) -> UUID:
+    try:
+        return UUID(str(payload))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise PersistenceCorruptionError(f"corrupt persisted {label}") from exc
+
+
+def _load_datetime(payload: object, label: str) -> datetime:
+    if not isinstance(payload, str):
+        raise PersistenceCorruptionError(f"corrupt persisted {label}")
+    try:
+        return datetime.fromisoformat(payload)
+    except ValueError as exc:
+        raise PersistenceCorruptionError(f"corrupt persisted {label}") from exc
+
+
+def _load_json_mapping(payload: object, label: str) -> Mapping[str, JsonValue]:
+    if not isinstance(payload, str):
+        raise PersistenceCorruptionError(f"corrupt persisted {label}")
+    try:
+        loaded = json.loads(payload)
+    except (TypeError, ValueError) as exc:
+        raise PersistenceCorruptionError(f"corrupt persisted {label}") from exc
+    if not isinstance(loaded, dict) or any(not isinstance(key, str) for key in loaded):
+        raise PersistenceCorruptionError(f"corrupt persisted {label}")
+    return cast(Mapping[str, JsonValue], loaded)
 
 
 def _dump_json_value(value: object) -> str:

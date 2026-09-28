@@ -352,6 +352,30 @@ def test_load_core_rejects_non_contiguous_event_ordinals(tmp_path: Path) -> None
         reopened.load_core(ROOM_ID)
 
 
+def test_deleting_room_cannot_erase_event_history(tmp_path: Path) -> None:
+    database_path = tmp_path / "rooms.sqlite3"
+    store = SQLiteRoomStore(database_path)
+    store.migrate()
+    store.save_room(sample_persisted_room())
+    store.save_core(ROOM_ID, sample_state(), sample_events())
+    store.close()
+
+    connection = sqlite3.connect(database_path)
+    connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute(
+        "DELETE FROM rooms WHERE room_id = ?",
+        (str(ROOM_ID),),
+    )
+    connection.commit()
+    event_count = connection.execute(
+        "SELECT COUNT(*) FROM room_events WHERE room_id = ?",
+        (str(ROOM_ID),),
+    ).fetchone()
+    connection.close()
+
+    assert event_count == (len(sample_events()),)
+
+
 def test_save_core_validates_complete_history_digest(tmp_path: Path) -> None:
     store = SQLiteRoomStore(tmp_path / "rooms.sqlite3")
     store.migrate()
@@ -374,6 +398,30 @@ def test_transaction_rolls_back_all_store_api_mutations(tmp_path: Path) -> None:
 
     assert store.load_rooms() == (sample_persisted_room(),)
     assert store.load_recovery_audit(ROOM_ID) == ()
+
+
+def test_nested_write_conflict_rolls_back_without_aborting_outer_transaction(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteRoomStore(tmp_path / "rooms.sqlite3")
+    store.migrate()
+    store.save_room(sample_persisted_room())
+    mismatched_key = CommandDedupeKey(
+        command_id=SECOND_COMMAND_ID,
+        actor_type="host",
+        actor_key="host",
+    )
+
+    with store.transaction(), pytest.raises(PersistenceConflictError):
+        store.save_command_results(
+            ROOM_ID,
+            {
+                sample_command_key(): sample_command_result(),
+                mismatched_key: sample_command_result(),
+            },
+        )
+
+    assert store.load_command_results(ROOM_ID) == {}
 
 
 def test_command_trace_runtime_snapshot_and_audit_round_trip(
@@ -420,6 +468,28 @@ def test_recovery_audit_is_append_only(tmp_path: Path) -> None:
 
     with pytest.raises(PersistenceConflictError):
         store.append_recovery_audit(sample_audit())
+
+
+def test_load_recovery_audit_rejects_malformed_diff_json(tmp_path: Path) -> None:
+    database_path = tmp_path / "rooms.sqlite3"
+    store = SQLiteRoomStore(database_path)
+    store.migrate()
+    store.save_room(sample_persisted_room())
+    store.append_recovery_audit(sample_audit())
+    store.close()
+
+    connection = sqlite3.connect(database_path)
+    connection.execute(
+        "UPDATE host_recovery_audit SET diff_json = ? WHERE record_id = ?",
+        ("{not-json", str(AUDIT_ID)),
+    )
+    connection.commit()
+    connection.close()
+
+    reopened = SQLiteRoomStore(database_path)
+    reopened.migrate()
+    with pytest.raises(PersistenceCorruptionError):
+        reopened.load_recovery_audit(ROOM_ID)
 
 
 def test_command_dedupe_key_requires_non_empty_actor_key() -> None:
