@@ -12,7 +12,7 @@ from time import monotonic_ns
 from typing import Literal, Protocol, Self
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
-from pydantic import Field, model_validator
+from pydantic import Field, ValidationError, model_validator
 
 from werewolf_dm.application.core import Clock, GameCore
 from werewolf_dm.application.dm_contracts import (
@@ -526,6 +526,23 @@ class RoomActor:
 
         now_ms = self.monotonic_now_ms()
         slot_item = self._outbox_item(slot.domain_seq)
+        explicit_candidate: tuple[str, TemplateIntent, list[TemplateFact]] | None = None
+        if intent is not None:
+            if slot_item is None:
+                raise ValueError("ANNOUNCEMENT_ITEM_NOT_FOUND")
+            try:
+                intent = TemplateIntent.revalidate(intent)
+            except ValidationError as error:
+                raise ValueError("ANNOUNCEMENT_INTENT_INVALID") from error
+            intent_seat_id = intent.audience_seat_ids[0] if intent.channel == "seat" else None
+            if intent_seat_id != slot_item.audience_seat_id:
+                raise ValueError("ANNOUNCEMENT_AUDIENCE_MISMATCH")
+            explicit_candidate = (
+                slot_item.kind,
+                intent,
+                [] if facts is None else list(facts),
+            )
+
         if (
             slot_item is not None
             and slot_item.audience_seat_id is not None
@@ -535,12 +552,8 @@ class RoomActor:
             return self._suppressed_result(slot.domain_seq)
 
         candidate = self._announcement_candidates.get(slot.domain_seq)
-        if intent is not None:
-            candidate = (
-                self._kind_for_domain_seq(slot.domain_seq),
-                intent,
-                [] if facts is None else list(facts),
-            )
+        if explicit_candidate is not None:
+            candidate = explicit_candidate
             self._announcement_candidates[slot.domain_seq] = candidate
         elif candidate is None:
             try:
@@ -762,12 +775,6 @@ class RoomActor:
             (item for item in self.core.state.outbox if item.seq == domain_seq),
             None,
         )
-
-    def _kind_for_domain_seq(self, domain_seq: int) -> str:
-        item = self._outbox_item(domain_seq)
-        if item is None:
-            raise KeyError(domain_seq)
-        return item.kind
 
     def _audience_matches_current_binding(
         self,
