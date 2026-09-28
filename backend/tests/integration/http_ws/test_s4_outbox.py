@@ -418,6 +418,49 @@ async def test_seat_session_rebinding_invalidates_old_audience() -> None:
 
 
 @pytest.mark.asyncio
+async def test_seat_session_rebinding_rejects_old_session_binding() -> None:
+    scenario = core_at_wolf()
+    actor = _actor(scenario.core)
+    await actor.start()
+    item = next(item for item in scenario.core.state.outbox if item.audience_seat_id is not None)
+    assert item.audience_seat_id is not None
+    target_seat_id = item.audience_seat_id
+    first = RecordingSubscriber(
+        actor_type="seat",
+        seat_id=target_seat_id,
+        channels=frozenset({"public", "seat"}),
+    )
+    await actor.attach_subscriber(first)
+    old_session = actor.seat_session_id(target_seat_id)
+    assert old_session is not None
+
+    await actor.detach_subscriber(first.subscription_id)
+    second = RecordingSubscriber(
+        actor_type="seat",
+        seat_id=target_seat_id,
+        channels=frozenset({"public", "seat"}),
+    )
+    await actor.attach_subscriber(second)
+    new_session = actor.seat_session_id(target_seat_id)
+    assert new_session is not None and new_session != old_session
+
+    intent, facts = _seat_intent_and_facts(
+        actor,
+        domain_seq=item.seq,
+        seat_id=target_seat_id,
+        session_id=old_session,
+    )
+    result = await actor.admit(_slot(actor, item.seq), intent=intent, facts=facts)
+
+    assert result.admitted is False
+    assert actor.last_trace is not None
+    assert actor.last_trace.suppress_reason == "stale_phase"
+    assert item.seq not in actor.domain_to_transport
+    assert not any(message.type == "dm.message" for message in second.messages)
+    await actor.stop()
+
+
+@pytest.mark.asyncio
 async def test_public_message_is_not_invalidated_by_seat_rebinding() -> None:
     actor = _actor(_core_exile_last_wolf(), now=datetime(2026, 9, 27, tzinfo=UTC))
     await actor.start()

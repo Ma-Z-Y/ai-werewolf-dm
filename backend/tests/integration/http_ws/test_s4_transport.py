@@ -215,6 +215,106 @@ async def test_explicit_seat_intent_must_match_outbox_audience() -> None:
 
 
 @pytest.mark.asyncio
+async def test_explicit_seat_intent_must_match_offline_outbox_audience() -> None:
+    scenario = core_at_wolf()
+    actor = _actor(scenario.core)
+    await actor.start()
+    item = next(item for item in scenario.core.state.outbox if item.audience_seat_id is not None)
+    assert item.audience_seat_id is not None
+    other_seat_id = next(seat_id for seat_id in range(1, 7) if seat_id != item.audience_seat_id)
+    await actor.attach_subscriber(
+        RecordingSubscriber(
+            actor_type="seat",
+            seat_id=other_seat_id,
+            channels=frozenset({"public", "seat"}),
+        )
+    )
+    session_id = actor.seat_session_id(other_seat_id)
+    assert session_id is not None
+    intent, facts = _seat_intent_and_facts(
+        actor,
+        domain_seq=item.seq,
+        seat_id=other_seat_id,
+        session_id=session_id,
+    )
+
+    with pytest.raises(ValueError, match="ANNOUNCEMENT_AUDIENCE_MISMATCH"):
+        await actor.admit(_slot(actor, item.seq), intent=intent, facts=facts)
+
+    assert item.seq not in actor._completed_domain_seqs
+    assert actor.dm_trace == []
+    assert actor.published_messages == []
+    await actor.stop()
+
+
+@pytest.mark.asyncio
+async def test_explicit_intent_requires_an_existing_outbox_item() -> None:
+    scenario = core_at_wolf()
+    actor = _actor(scenario.core)
+    await actor.start()
+    item = next(item for item in scenario.core.state.outbox if item.audience_seat_id is not None)
+    assert item.audience_seat_id is not None
+    await actor.attach_subscriber(
+        RecordingSubscriber(
+            actor_type="seat",
+            seat_id=item.audience_seat_id,
+            channels=frozenset({"public", "seat"}),
+        )
+    )
+    session_id = actor.seat_session_id(item.audience_seat_id)
+    assert session_id is not None
+    intent, facts = _seat_intent_and_facts(
+        actor,
+        domain_seq=item.seq,
+        seat_id=item.audience_seat_id,
+        session_id=session_id,
+    )
+    missing_seq = max(outbox_item.seq for outbox_item in scenario.core.state.outbox) + 1
+
+    with pytest.raises(ValueError, match="ANNOUNCEMENT_ITEM_NOT_FOUND"):
+        await actor.admit(_slot(actor, missing_seq), intent=intent, facts=facts)
+
+    assert missing_seq not in actor._completed_domain_seqs
+    assert actor.dm_trace == []
+    assert actor.domain_to_transport == {}
+    await actor.stop()
+
+
+@pytest.mark.asyncio
+async def test_explicit_intent_rejects_malformed_seat_audience() -> None:
+    scenario = core_at_wolf()
+    actor = _actor(scenario.core)
+    await actor.start()
+    item = next(item for item in scenario.core.state.outbox if item.audience_seat_id is not None)
+    assert item.audience_seat_id is not None
+    await actor.attach_subscriber(
+        RecordingSubscriber(
+            actor_type="seat",
+            seat_id=item.audience_seat_id,
+            channels=frozenset({"public", "seat"}),
+        )
+    )
+    session_id = actor.seat_session_id(item.audience_seat_id)
+    assert session_id is not None
+    intent, facts = _seat_intent_and_facts(
+        actor,
+        domain_seq=item.seq,
+        seat_id=item.audience_seat_id,
+        session_id=session_id,
+    )
+    payload = intent.model_dump()
+    payload["audience_seat_ids"] = ()
+    malformed = TemplateIntent.model_construct(**payload)
+
+    with pytest.raises(ValueError, match="ANNOUNCEMENT_AUDIENCE_MISMATCH"):
+        await actor.admit(_slot(actor, item.seq), intent=malformed, facts=facts)
+
+    assert item.seq not in actor._completed_domain_seqs
+    assert actor.dm_trace == []
+    await actor.stop()
+
+
+@pytest.mark.asyncio
 async def test_offline_seat_prompt_is_completed_without_blocking_later_slots() -> None:
     scenario = core_at_wolf()
     actor = _actor(scenario.core)

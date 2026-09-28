@@ -1,6 +1,6 @@
 ---
 spec_id: s4-ai-dm-design
-version: 1.1.4
+version: 1.1.5
 status: frozen
 proposed_at: 2026-09-27
 frozen_at: 2026-09-28
@@ -11,7 +11,7 @@ depends_on:
   - s2-realtime-interface-design@1.2.0
   - s3-frontend-constitution@1.1.0
   - s4-ai-dm-constitution@1.1.0
-  - verification-matrix@1.5.4
+  - verification-matrix@1.5.5
 overrides:
   - target: system-design@1.1.0#4
     scope: S4 dm_trace is clipped to template metadata and no raw diagnostics leave memory.
@@ -25,10 +25,10 @@ overrides:
     scope: S4 active admission is template-only; 2.0s remains the absolute ceiling.
   - target: system-design@1.1.0#12
     scope: S4 host audit exports clipped template trace only.
-supersedes: s4-ai-dm-design@1.1.3
+supersedes: s4-ai-dm-design@1.1.4
 ---
 
-# S4 AI DM 设计 v1.1.4
+# S4 AI DM 设计 v1.1.5
 
 ## 1. 状态与效力
 
@@ -475,6 +475,15 @@ slot。每个已接纳 DM message 分配并递增一次 `RoomActor.outbox_seq`�
 5. room 未关闭且未过期；
 6. message audience 仍与当前 session binding 匹配。
 
+若调用方显式提供 `TemplateIntent`（admission seam），则在任何
+offline、duplicate 或 stale 短路之前，必须校验 slot 对应的
+`OutboxItem` 存在，且 intent channel/seat audience 与
+`OutboxItem.audience_seat_id` 完全一致。缺失 item 使用
+`ANNOUNCEMENT_ITEM_NOT_FOUND`，audience 不一致使用
+`ANNOUNCEMENT_AUDIENCE_MISMATCH` fail closed；两种失败都不得发布、
+建立 `domain_to_transport`、写 trace，或推进 completed/processed
+状态。
+
 若 seat-targeted slot 在 admission 时没有当前 actor-owned session，则该
 slot 视为 ineligible：RoomActor 只完成 `domain_seq` 并推进
 `processed_announcement_seq`，不发布消息、不建立 `domain_to_transport`、
@@ -653,6 +662,15 @@ provider schema/refusal/truncation 和 raw prompt/output 测试全部 deferred�
 降低门禁必须提升产品规格版本并获得用户确认。
 
 ## 16. 变更历史
+
+### v1.1.5 - 2026-09-28
+
+- 将显式 intent admission 的一致性校验提升为规范性 admission 条款：
+  缺失 outbox item 或 intent/outbox audience 不一致时，必须先于
+  offline/duplicate/stale 短路 fail closed，且不得发布、建 mapping、
+  写 trace 或推进 completed/processed 状态。
+- 冻结 `ANNOUNCEMENT_ITEM_NOT_FOUND` 与
+  `ANNOUNCEMENT_AUDIENCE_MISMATCH` 的拒绝语义。
 
 ### v1.1.4 - 2026-09-28
 

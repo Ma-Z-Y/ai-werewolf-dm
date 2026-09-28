@@ -526,6 +526,26 @@ class RoomActor:
 
         now_ms = self.monotonic_now_ms()
         slot_item = self._outbox_item(slot.domain_seq)
+        explicit_candidate: tuple[str, TemplateIntent, list[TemplateFact]] | None = None
+        if intent is not None:
+            if slot_item is None:
+                raise ValueError("ANNOUNCEMENT_ITEM_NOT_FOUND")
+            if intent.channel == "seat":
+                if len(intent.audience_seat_ids) != 1:
+                    raise ValueError("ANNOUNCEMENT_AUDIENCE_MISMATCH")
+                intent_seat_id = intent.audience_seat_ids[0]
+            else:
+                if intent.audience_seat_ids:
+                    raise ValueError("ANNOUNCEMENT_AUDIENCE_MISMATCH")
+                intent_seat_id = None
+            if intent_seat_id != slot_item.audience_seat_id:
+                raise ValueError("ANNOUNCEMENT_AUDIENCE_MISMATCH")
+            explicit_candidate = (
+                slot_item.kind,
+                intent,
+                [] if facts is None else list(facts),
+            )
+
         if (
             slot_item is not None
             and slot_item.audience_seat_id is not None
@@ -534,18 +554,9 @@ class RoomActor:
             self._complete_silently(slot.domain_seq)
             return self._suppressed_result(slot.domain_seq)
 
-        if intent is not None and slot_item is not None:
-            intent_seat_id = intent.audience_seat_ids[0] if intent.channel == "seat" else None
-            if intent_seat_id != slot_item.audience_seat_id:
-                raise ValueError("ANNOUNCEMENT_AUDIENCE_MISMATCH")
-
         candidate = self._announcement_candidates.get(slot.domain_seq)
-        if intent is not None:
-            candidate = (
-                slot_item.kind if slot_item is not None else "dm.message",
-                intent,
-                [] if facts is None else list(facts),
-            )
+        if explicit_candidate is not None:
+            candidate = explicit_candidate
             self._announcement_candidates[slot.domain_seq] = candidate
         elif candidate is None:
             try:
