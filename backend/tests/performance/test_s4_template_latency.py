@@ -23,6 +23,7 @@ from tests.integration.http_ws.test_six_client_flow import (
     running_server,
 )
 from werewolf_dm.application.core import GameCore
+from werewolf_dm.application.dm_contracts import DMAdmissionResult
 from werewolf_dm.application.dm_service import TemplateDMService
 from werewolf_dm.interfaces.http_ws.runtime import ConnectionSink
 
@@ -91,7 +92,7 @@ async def test_lat_004_six_client_dm_message_p95_under_300ms() -> None:
                 for joined_room in joined
             ]
 
-            async def replace_and_admit(core: GameCore) -> None:
+            async def replace_and_admit(core: GameCore) -> DMAdmissionResult:
                 room.core = core
                 room.clock = core.clock
                 room._completed_domain_seqs.clear()
@@ -100,13 +101,15 @@ async def test_lat_004_six_client_dm_message_p95_under_300ms() -> None:
                 dm_domain_seq = max(
                     item.seq for item in core.state.outbox if item.kind == "dm.message"
                 )
-                await room.consume_slot(domain_seq=dm_domain_seq)
+                return await room.consume_slot(domain_seq=dm_domain_seq)
 
-            def receive_dm_message(socket_: ClientConnection) -> float:
+            def receive_dm_message(
+                socket_: ClientConnection,
+            ) -> tuple[float, dict[str, object]]:
                 while True:
                     message = receive_json(socket_)
                     if message.get("type") == "dm.message":
-                        return (perf_counter() - started) * 1000.0
+                        return (perf_counter() - started) * 1000.0, message
 
             samples: list[float] = []
             for core in cores:
@@ -114,8 +117,19 @@ async def test_lat_004_six_client_dm_message_p95_under_300ms() -> None:
                     started = perf_counter()
                     pending = [executor.submit(receive_dm_message, socket_) for socket_ in sockets]
                     admitted = asyncio.run_coroutine_threadsafe(replace_and_admit(core), loop)
-                    admitted.result(timeout=5)
-                    samples.extend(future.result(timeout=5) for future in pending)
+                    expected = admitted.result(timeout=5)
+                    assert expected.message is not None
+                    for future in pending:
+                        elapsed_ms, message = future.result(timeout=5)
+                        nested = message["message"]
+                        assert isinstance(nested, dict)
+                        assert message["outbox_seq"] == expected.transport_seq
+                        assert nested["message_id"] == str(expected.message.message_id)
+                        assert nested["room_id"] == str(expected.message.room_id)
+                        assert nested["revision"] == expected.message.revision
+                        assert nested["channel"] == expected.message.channel
+                        assert nested["text"] == expected.message.text
+                        samples.append(elapsed_ms)
 
     assert len(samples) == LAT004_ROUNDS * len(sockets)
     measured_p95 = _p95(samples)

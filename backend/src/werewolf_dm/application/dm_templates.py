@@ -21,7 +21,7 @@ from werewolf_dm.application.dm_contracts import (
 from werewolf_dm.domain.enums import Phase
 
 _CATALOG_VERSION = "s4-template-v1"
-_CLAIM_MARKER_PATTERN = re.compile("声称|SPEECH", re.IGNORECASE)
+_CLAIM_MARKER_PATTERN = re.compile("声称|SPEAK|SPEECH", re.IGNORECASE)
 _HIDDEN_IDENTITY_PATTERN = re.compile("WEREWOLF|狼人|预言家|女巫|药水|查验", re.IGNORECASE)
 _PHASE_LABELS: Mapping[Phase, str] = {
     Phase.LOBBY: "玩家准备",

@@ -10,6 +10,7 @@ import pytest
 from fastapi import APIRouter
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from tests.factories import core_at_wolf
 from werewolf_dm.application.core import FrozenClock
@@ -261,3 +262,61 @@ def test_metrics_response_schema_matches_openapi() -> None:
     for name, field in Metrics.model_fields.items():
         assert field.description
         assert metrics_properties[name]["description"] == field.description
+
+
+def test_metrics_payload_enforces_numeric_bounds() -> None:
+    valid = DMTemplateMetricsPayload(
+        eligible=1,
+        template_admitted=1,
+        render_failed=0,
+        slot_suppressed=0,
+        template_admission_rate=1.0,
+        render_failure_rate=0.0,
+        slot_suppressed_rate=0.0,
+        admission_ms_p95=1.0,
+        domain_transport_ratio=1.0,
+        max_domain_transport_lag=0,
+        consistent=True,
+    )
+    invalid_updates = {
+        "eligible": -1,
+        "template_admitted": -1,
+        "render_failed": -1,
+        "slot_suppressed": -1,
+        "admission_ms_p95": -0.1,
+        "max_domain_transport_lag": -1,
+        "template_admission_rate": -0.1,
+        "render_failure_rate": 1.1,
+        "slot_suppressed_rate": -0.1,
+        "domain_transport_ratio": 1.1,
+    }
+    for field, value in invalid_updates.items():
+        with pytest.raises(ValidationError):
+            DMTemplateMetricsPayload(
+                **{
+                    **valid.model_dump(),
+                    field: value,
+                }
+            )
+
+    with _privacy_client() as (client, _):
+        openapi = client.get("/openapi.json").json()
+
+    template_properties = openapi["components"]["schemas"]["DMTemplateMetricsPayload"]["properties"]
+    for field in (
+        "eligible",
+        "template_admitted",
+        "render_failed",
+        "slot_suppressed",
+        "admission_ms_p95",
+        "max_domain_transport_lag",
+    ):
+        assert template_properties[field]["minimum"] == 0
+    for field in (
+        "template_admission_rate",
+        "render_failure_rate",
+        "slot_suppressed_rate",
+        "domain_transport_ratio",
+    ):
+        assert template_properties[field]["minimum"] == 0.0
+        assert template_properties[field]["maximum"] == 1.0

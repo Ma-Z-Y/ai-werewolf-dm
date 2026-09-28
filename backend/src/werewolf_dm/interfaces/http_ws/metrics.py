@@ -24,29 +24,35 @@ from werewolf_dm.interfaces.http_ws.authorization import authorize_bearer
 
 
 class DMTemplateMetricsPayload(StrictModel):
-    eligible: int = Field(description="Eligible template domain slots.")
-    template_admitted: int = Field(description="Slots admitted to the wire outbox.")
-    render_failed: int = Field(description="Slots that failed closed during rendering.")
+    eligible: int = Field(ge=0, description="Eligible template domain slots.")
+    template_admitted: int = Field(
+        ge=0,
+        description="Slots admitted to the wire outbox.",
+    )
+    render_failed: int = Field(
+        ge=0,
+        description="Slots that failed closed during rendering.",
+    )
     slot_suppressed: int = Field(
-        description="Slots suppressed before admission; excludes transport failures."
+        ge=0, description="Slots suppressed before admission; excludes transport failures."
     )
     template_admission_rate: float = Field(
-        description="template_admitted divided by completed admission terminals."
+        ge=0.0, le=1.0, description="template_admitted divided by completed admission terminals."
     )
     render_failure_rate: float = Field(
-        description="render_failed divided by completed admission terminals."
+        ge=0.0, le=1.0, description="render_failed divided by completed admission terminals."
     )
     slot_suppressed_rate: float = Field(
-        description="slot_suppressed divided by completed admission terminals."
+        ge=0.0, le=1.0, description="slot_suppressed divided by completed admission terminals."
     )
     admission_ms_p95: float = Field(
-        description="Nearest-rank p95 of admission latency in milliseconds."
+        ge=0.0, description="Nearest-rank p95 of admission latency in milliseconds."
     )
     domain_transport_ratio: float = Field(
-        description="Mapped domain slots divided by completed domain slots."
+        ge=0.0, le=1.0, description="Mapped domain slots divided by completed domain slots."
     )
     max_domain_transport_lag: int = Field(
-        description="Maximum positive domain_seq minus transport_seq lag."
+        ge=0, description="Maximum positive domain_seq minus transport_seq lag."
     )
     consistent: bool = Field(
         description=(

@@ -314,11 +314,18 @@ def _terminal_traces(traces: Iterable[DMTraceRecord]) -> tuple[DMTraceRecord, ..
         if current is None:
             by_intent[trace.intent_id] = trace
             continue
-        if (
-            current.suppress_reason == "duplicate_slot"
-            and trace.suppress_reason != "duplicate_slot"
+        if current.suppress_reason == "duplicate_slot":
+            if trace.suppress_reason != "duplicate_slot":
+                by_intent[trace.intent_id] = trace
+            continue
+        if trace.suppress_reason == "duplicate_slot":
+            continue
+        if (trace.admission_status, trace.suppress_reason) == (
+            current.admission_status,
+            current.suppress_reason,
         ):
-            by_intent[trace.intent_id] = trace
+            continue
+        raise ValueError("conflicting terminal traces for one intent")
     return tuple(by_intent.values())
 
 
