@@ -5,7 +5,7 @@ import contextlib
 import hashlib
 import secrets
 import string
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from time import monotonic_ns
@@ -333,6 +333,21 @@ class TokenService:
         self._records: dict[str, TokenRecord] = {}
         self._seat_records: dict[UUID, dict[int, TokenRecord]] = {}
         self._display_records: dict[UUID, TokenRecord] = {}
+
+    @contextlib.contextmanager
+    def mutation_scope(self) -> Iterator[None]:
+        records = self._records.copy()
+        seat_records = {
+            room_id: room_records.copy() for room_id, room_records in self._seat_records.items()
+        }
+        display_records = self._display_records.copy()
+        try:
+            yield
+        except BaseException:
+            self._records = records
+            self._seat_records = seat_records
+            self._display_records = display_records
+            raise
 
     @staticmethod
     def digest(raw_token: str) -> str:
@@ -879,9 +894,9 @@ class RoomActor:
     def sync_display_session(self) -> None:
         self.events.put_nowait(SyncDisplaySessionEvent(active_session_id=self.display_session_id))
 
-    def touch(self, *, now: datetime | None = None) -> None:
+    def touch(self, *, now: datetime | None = None, persist: bool = True) -> None:
         self.last_activity_at = self.clock() if now is None else now
-        if self._activity_sink is not None:
+        if persist and self._activity_sink is not None:
             self._activity_sink(self)
 
     def _reject_pending_futures(self, exc: BaseException) -> None:
@@ -1352,9 +1367,11 @@ class RoomRegistry:
 
     def _restore_from_store(self, store: SQLiteRoomStore) -> None:
         now = self.clock()
-        persisted_rooms = tuple(room for room in store.load_rooms() if room.expires_at > now)
         actors_by_id: dict[UUID, RoomActor] = {}
-        for persisted in persisted_rooms:
+        for persisted in store.load_rooms():
+            if persisted.expires_at <= now:
+                store.delete_room(persisted.room_id)
+                continue
             actor = self._new_actor(
                 room_id=persisted.room_id,
                 room_code=persisted.room_code,
@@ -1533,19 +1550,16 @@ class RoomRegistry:
                 break
         else:
             raise RuntimeError("ROOM_CODE_EXHAUSTED")
-        token, expires_at = self.tokens.issue_host(room_id, ttl)
-        actor = self._new_actor(
-            room_id=room_id,
-            room_code=room_code,
-            seed=self.seed_source(),
-            expires_at=expires_at,
-            last_activity_at=self.clock(),
-        )
-        try:
+        with self.tokens.mutation_scope():
+            token, expires_at = self.tokens.issue_host(room_id, ttl)
+            actor = self._new_actor(
+                room_id=room_id,
+                room_code=room_code,
+                seed=self.seed_source(),
+                expires_at=expires_at,
+                last_activity_at=self.clock(),
+            )
             self._persist_room_and_token(actor, self.tokens.resolve(token))
-        except BaseException:
-            self.tokens.remove_room(room_id)
-            raise
         self.rooms[room_code] = actor
         return CreatedRoom(
             room_id=room_id,
@@ -1563,13 +1577,19 @@ class RoomRegistry:
         )
         if seat_id is None:
             raise ValueError("ROOM_FULL")
-        actor.touch()
-        token, expires_at = self.tokens.issue_seat(
-            actor.room_id,
-            seat_id,
-            timedelta(hours=4),
-        )
-        self._persist_room_and_token(actor, self.tokens.resolve(token))
+        previous_activity = actor.last_activity_at
+        try:
+            with self.tokens.mutation_scope():
+                actor.touch(persist=False)
+                token, expires_at = self.tokens.issue_seat(
+                    actor.room_id,
+                    seat_id,
+                    timedelta(hours=4),
+                )
+                self._persist_room_and_token(actor, self.tokens.resolve(token))
+        except BaseException:
+            actor.last_activity_at = previous_activity
+            raise
         return JoinedRoom(
             room_id=actor.room_id,
             room_code=room_code,
@@ -1625,36 +1645,54 @@ class RoomRegistry:
             if pairing.failed_attempts >= 5:
                 self._display_pairings.pop(room.room_id, None)
             raise ValueError("TOKEN_INVALID")
-        self._display_pairings.pop(room.room_id, None)
         previous_display = self.tokens.display_record(room.room_id)
-        raw, expires_at = self.tokens.issue_display(
-            room.room_id,
-            timedelta(hours=1),
-            room_expires_at=room.expires_at,
-        )
-        record = self.tokens.display_record(room.room_id)
-        assert record is not None and record.session_id is not None
-        room.display_session_id = record.session_id
-        room.display_token_digest = self.tokens.digest(raw)
-        if self.store is not None:
-            with self.store.transaction():
-                if previous_display is not None:
-                    self.store.save_token(self._persisted_token(previous_display, revoked=True))
-                self.store.save_token(self._persisted_token(record))
-                self.store.save_room(self._persisted_room(room))
+        previous_digest = room.display_token_digest
+        previous_session = room.display_session_id
+        try:
+            with self.tokens.mutation_scope():
+                raw, expires_at = self.tokens.issue_display(
+                    room.room_id,
+                    timedelta(hours=1),
+                    room_expires_at=room.expires_at,
+                )
+                record = self.tokens.display_record(room.room_id)
+                assert record is not None and record.session_id is not None
+                room.display_session_id = record.session_id
+                room.display_token_digest = self.tokens.digest(raw)
+                if self.store is not None:
+                    with self.store.transaction():
+                        if previous_display is not None:
+                            self.store.save_token(
+                                self._persisted_token(previous_display, revoked=True)
+                            )
+                        self.store.save_token(self._persisted_token(record))
+                        self.store.save_room(self._persisted_room(room))
+        except BaseException:
+            room.display_token_digest = previous_digest
+            room.display_session_id = previous_session
+            raise
+        self._display_pairings.pop(room.room_id, None)
         room.sync_display_session()
         return room.room_id, raw, expires_at
 
     def revoke_display(self, room_code: str) -> None:
         room = self.get_by_code(room_code)
         record = self.tokens.display_record(room.room_id)
-        self.tokens.revoke_display(room.room_id)
-        room.display_token_digest = None
-        room.display_session_id = None
-        if self.store is not None and record is not None:
-            with self.store.transaction():
-                self.store.save_token(self._persisted_token(record, revoked=True))
-                self.store.save_room(self._persisted_room(room))
+        previous_digest = room.display_token_digest
+        previous_session = room.display_session_id
+        try:
+            with self.tokens.mutation_scope():
+                self.tokens.revoke_display(room.room_id)
+                room.display_token_digest = None
+                room.display_session_id = None
+                if self.store is not None and record is not None:
+                    with self.store.transaction():
+                        self.store.save_token(self._persisted_token(record, revoked=True))
+                        self.store.save_room(self._persisted_room(room))
+        except BaseException:
+            room.display_token_digest = previous_digest
+            room.display_session_id = previous_session
+            raise
         room.sync_display_session()
 
     async def start_room(self, room_code: str) -> None:
@@ -1662,18 +1700,20 @@ class RoomRegistry:
         await actor.start()
 
     async def remove_room(self, room_code: str) -> None:
-        actor = self.rooms.pop(room_code, None)
-        if actor is not None:
-            try:
-                await actor.stop()
-            finally:
-                self._display_pairings.pop(actor.room_id, None)
-                for key in tuple(self._pairing_attempts):
-                    if key[0] == actor.room_id:
-                        del self._pairing_attempts[key]
-                self.tokens.remove_room(actor.room_id)
-                if self.store is not None:
-                    self.store.delete_room(actor.room_id)
+        actor = self.rooms.get(room_code)
+        if actor is None:
+            return
+        if self.store is not None:
+            self.store.delete_room(actor.room_id)
+        self.rooms.pop(room_code, None)
+        try:
+            await actor.stop()
+        finally:
+            self._display_pairings.pop(actor.room_id, None)
+            for key in tuple(self._pairing_attempts):
+                if key[0] == actor.room_id:
+                    del self._pairing_attempts[key]
+            self.tokens.remove_room(actor.room_id)
 
     async def reap_expired(self) -> int:
         now = self.clock()

@@ -13,7 +13,7 @@ from werewolf_dm.application.rooms import (
     SequenceTokenSource,
     TokenService,
 )
-from werewolf_dm.infrastructure.persistence import SQLiteRoomStore
+from werewolf_dm.infrastructure.persistence import PersistedToken, SQLiteRoomStore
 
 
 class CountingClock:
@@ -147,6 +147,245 @@ def test_issued_seat_token_digest_survives_registry_reopen(tmp_path: Path) -> No
     reopened_store.close()
 
 
+def test_create_room_persistence_failure_leaves_no_room_or_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = SQLiteRoomStore(tmp_path / "rooms.sqlite3")
+    store.migrate()
+    registry = RoomRegistry(
+        clock=FrozenClock(datetime(2026, 9, 24, tzinfo=UTC)),
+        token_source=SequenceTokenSource(
+            tokens=("host-token", "retry-token"),
+            room_codes=("ROOM01", "ROOM02"),
+        ),
+        seed_source=lambda: 101,
+        store=store,
+    )
+    original_save_token = store.save_token
+    failed = False
+
+    def fail_once(token: PersistedToken) -> None:
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise RuntimeError("save token failed")
+        original_save_token(token)
+
+    monkeypatch.setattr(store, "save_token", fail_once)
+
+    with pytest.raises(RuntimeError, match="save token failed"):
+        registry.create_room(timedelta(hours=6))
+
+    assert registry.rooms == {}
+    with pytest.raises(ValueError, match="TOKEN_INVALID"):
+        registry.tokens.resolve("host-token")
+    assert store.load_rooms() == ()
+    assert store.load_tokens() == ()
+
+    created = registry.create_room(timedelta(hours=6))
+
+    assert created.room_code == "ROOM02"
+    assert tuple(token.actor_type for token in store.load_tokens()) == ("host",)
+    store.close()
+
+
+def test_join_room_persistence_failure_does_not_leave_ghost_seat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 9, 24, tzinfo=UTC)
+    database_path = tmp_path / "rooms.sqlite3"
+    store = SQLiteRoomStore(database_path)
+    store.migrate()
+    clock = FrozenClock(now)
+    registry = RoomRegistry(
+        clock=clock,
+        token_source=SequenceTokenSource(
+            tokens=("host-token", "seat-token"),
+            room_codes=("ROOM01",),
+        ),
+        seed_source=lambda: 101,
+        store=store,
+    )
+    created = registry.create_room(timedelta(hours=6))
+    actor = registry.get_by_code(created.room_code)
+    previous_activity = actor.last_activity_at
+    clock.set(now + timedelta(minutes=5))
+    original_save_token = store.save_token
+    failed = False
+
+    def fail_once(token: PersistedToken) -> None:
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise RuntimeError("save token failed")
+        original_save_token(token)
+
+    monkeypatch.setattr(store, "save_token", fail_once)
+
+    with pytest.raises(RuntimeError, match="save token failed"):
+        registry.join_room(created.room_code, display_name="Alpha")
+
+    assert registry.tokens.active_seat_ids(created.room_id) == set()
+    with pytest.raises(ValueError, match="TOKEN_INVALID"):
+        registry.tokens.resolve("seat-token")
+    assert actor.last_activity_at == previous_activity
+    assert tuple(token.actor_type for token in store.load_tokens()) == ("host",)
+    assert store.load_rooms()[0].last_activity_at == previous_activity
+    store.close()
+
+    reopened_store = SQLiteRoomStore(database_path)
+    reopened_store.migrate()
+    reopened = RoomRegistry(
+        clock=FrozenClock(now + timedelta(minutes=5)),
+        token_source=SequenceTokenSource(tokens=(), room_codes=()),
+        seed_source=lambda: 999,
+        store=reopened_store,
+    )
+
+    assert reopened.tokens.active_seat_ids(created.room_id) == set()
+    assert reopened.tokens.resolve(created.host_token).actor_type == "host"
+    reopened_store.close()
+
+
+def test_display_rotation_persistence_failure_keeps_previous_token_and_pairing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = SQLiteRoomStore(tmp_path / "rooms.sqlite3")
+    store.migrate()
+    registry = RoomRegistry(
+        clock=FrozenClock(datetime(2026, 9, 24, tzinfo=UTC)),
+        token_source=SequenceTokenSource(
+            tokens=("host-token", "display-one", "display-two", "display-three"),
+            room_codes=("ROOM01",),
+        ),
+        seed_source=lambda: 101,
+        store=store,
+    )
+    created = registry.create_room(timedelta(hours=6))
+    first_pairing, _, _ = registry.create_display_pairing(created.room_code)
+    _, first_display_token, _ = registry.exchange_display_pairing(
+        created.room_code,
+        first_pairing,
+        source="127.0.0.1",
+    )
+    first_record = registry.tokens.resolve(first_display_token)
+    actor = registry.get_by_code(created.room_code)
+    previous_digest = actor.display_token_digest
+    previous_session = actor.display_session_id
+    second_pairing, _, _ = registry.create_display_pairing(created.room_code)
+    original_save_token = store.save_token
+    failed = False
+
+    def fail_once(token: PersistedToken) -> None:
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise RuntimeError("save token failed")
+        original_save_token(token)
+
+    monkeypatch.setattr(store, "save_token", fail_once)
+
+    with pytest.raises(RuntimeError, match="save token failed"):
+        registry.exchange_display_pairing(
+            created.room_code,
+            second_pairing,
+            source="127.0.0.1",
+        )
+
+    assert registry.tokens.resolve(first_display_token) == first_record
+    assert registry.tokens.display_record(created.room_id) == first_record
+    assert actor.display_token_digest == previous_digest
+    assert actor.display_session_id == previous_session
+    persisted = {token.token_digest: token for token in store.load_tokens()}
+    assert persisted[first_record.token_digest].revoked is False
+
+    _, second_display_token, _ = registry.exchange_display_pairing(
+        created.room_code,
+        second_pairing,
+        source="127.0.0.1",
+    )
+
+    with pytest.raises(ValueError, match="TOKEN_INVALID"):
+        registry.tokens.resolve(first_display_token)
+    assert registry.tokens.resolve(second_display_token).actor_type == "display"
+    store.close()
+
+
+def test_display_revoke_persistence_failure_keeps_display_active(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 9, 24, tzinfo=UTC)
+    database_path = tmp_path / "rooms.sqlite3"
+    store = SQLiteRoomStore(database_path)
+    store.migrate()
+    registry = RoomRegistry(
+        clock=FrozenClock(now),
+        token_source=SequenceTokenSource(
+            tokens=("host-token", "display-token"),
+            room_codes=("ROOM01",),
+        ),
+        seed_source=lambda: 101,
+        store=store,
+    )
+    created = registry.create_room(timedelta(hours=6))
+    pairing, _, _ = registry.create_display_pairing(created.room_code)
+    _, display_token, _ = registry.exchange_display_pairing(
+        created.room_code,
+        pairing,
+        source="127.0.0.1",
+    )
+    display_record = registry.tokens.resolve(display_token)
+    actor = registry.get_by_code(created.room_code)
+    previous_digest = actor.display_token_digest
+    previous_session = actor.display_session_id
+    original_save_token = store.save_token
+    failed = False
+
+    def fail_once(token: PersistedToken) -> None:
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise RuntimeError("save token failed")
+        original_save_token(token)
+
+    monkeypatch.setattr(store, "save_token", fail_once)
+
+    with pytest.raises(RuntimeError, match="save token failed"):
+        registry.revoke_display(created.room_code)
+
+    assert registry.tokens.resolve(display_token) == display_record
+    assert actor.display_token_digest == previous_digest
+    assert actor.display_session_id == previous_session
+    persisted = {token.token_digest: token for token in store.load_tokens()}
+    assert persisted[display_record.token_digest].revoked is False
+
+    registry.revoke_display(created.room_code)
+
+    with pytest.raises(ValueError, match="TOKEN_INVALID"):
+        registry.tokens.resolve(display_token)
+    assert actor.display_token_digest is None
+    assert actor.display_session_id is None
+    store.close()
+
+    reopened_store = SQLiteRoomStore(database_path)
+    reopened_store.migrate()
+    reopened = RoomRegistry(
+        clock=FrozenClock(now),
+        token_source=SequenceTokenSource(tokens=(), room_codes=()),
+        seed_source=lambda: 999,
+        store=reopened_store,
+    )
+
+    with pytest.raises(ValueError, match="TOKEN_INVALID"):
+        reopened.tokens.resolve(display_token)
+    assert reopened.get_by_code(created.room_code).display_token_digest is None
+    reopened_store.close()
+
+
 def test_expired_room_is_not_loaded_after_restart(tmp_path: Path) -> None:
     now = datetime(2026, 9, 24, tzinfo=UTC)
     database_path = tmp_path / "rooms.sqlite3"
@@ -167,16 +406,20 @@ def test_expired_room_is_not_loaded_after_restart(tmp_path: Path) -> None:
     reopened_store.migrate()
     reopened = RoomRegistry(
         clock=clock,
-        token_source=SequenceTokenSource(tokens=(), room_codes=()),
+        token_source=SequenceTokenSource(tokens=("reused-token",), room_codes=("ROOM01",)),
         seed_source=lambda: 999,
         store=reopened_store,
     )
 
     assert reopened.rooms == {}
+    assert reopened_store.load_rooms() == ()
+    assert reopened_store.load_tokens() == ()
     with pytest.raises(ValueError, match="ROOM_NOT_FOUND"):
         reopened.get_by_code(created.room_code)
     with pytest.raises(ValueError, match="TOKEN_INVALID"):
         reopened.tokens.resolve(created.host_token)
+    reused = reopened.create_room(timedelta(hours=1))
+    assert reused.room_code == created.room_code
     reopened_store.close()
 
 
@@ -614,6 +857,56 @@ async def test_remove_room_cleans_tokens_after_cancel() -> None:
 
     with pytest.raises(ValueError, match="TOKEN_INVALID"):
         registry.tokens.resolve(created.host_token)
+
+
+@pytest.mark.asyncio
+async def test_remove_room_persistence_failure_keeps_room_and_tokens(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = SQLiteRoomStore(tmp_path / "rooms.sqlite3")
+    store.migrate()
+    registry = RoomRegistry(
+        clock=FrozenClock(datetime(2026, 9, 24, tzinfo=UTC)),
+        token_source=SequenceTokenSource(
+            tokens=("host-token", "seat-token"),
+            room_codes=("ROOM01",),
+        ),
+        seed_source=lambda: 101,
+        store=store,
+    )
+    created = registry.create_room(timedelta(hours=6))
+    joined = registry.join_room(created.room_code, display_name="Alpha")
+    original_delete_room = store.delete_room
+    failed = False
+
+    def fail_once(room_id: UUID) -> None:
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise RuntimeError("delete room failed")
+        original_delete_room(room_id)
+
+    monkeypatch.setattr(store, "delete_room", fail_once)
+
+    with pytest.raises(RuntimeError, match="delete room failed"):
+        await registry.remove_room(created.room_code)
+
+    assert registry.get_by_code(created.room_code).room_id == created.room_id
+    assert registry.tokens.resolve(created.host_token).actor_type == "host"
+    assert registry.tokens.resolve(joined.seat_token).seat_id == 1
+    assert tuple(room.room_code for room in store.load_rooms()) == ("ROOM01",)
+    assert {token.actor_type for token in store.load_tokens()} == {"host", "seat"}
+
+    await registry.remove_room(created.room_code)
+
+    with pytest.raises(ValueError, match="ROOM_NOT_FOUND"):
+        registry.get_by_code(created.room_code)
+    with pytest.raises(ValueError, match="TOKEN_INVALID"):
+        registry.tokens.resolve(created.host_token)
+    assert store.load_rooms() == ()
+    assert store.load_tokens() == ()
+    store.close()
 
 
 @pytest.mark.asyncio
