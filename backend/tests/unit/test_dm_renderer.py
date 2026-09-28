@@ -220,7 +220,11 @@ def test_renderer_rejects_hidden_identity_values(seat_ids: str) -> None:
 
 @pytest.mark.parametrize(
     "template_text",
-    ["SPEECH: {seat_ids} 出局。", "玩家声称: {seat_ids} 出局。"],
+    [
+        "SPEAK: {seat_ids} 出局。",
+        "SPEECH: {seat_ids} 出局。",
+        "玩家声称: {seat_ids} 出局。",
+    ],
 )
 def test_renderer_rejects_claim_and_speech_in_template_text(template_text: str) -> None:
     catalog = _catalog_with_variant(

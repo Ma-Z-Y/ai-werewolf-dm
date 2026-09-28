@@ -255,6 +255,35 @@ def test_duplicate_slot_does_not_double_count_a_terminal_slot() -> None:
     assert metrics.completed == 1
 
 
+@pytest.mark.parametrize(
+    ("first_status", "second_status"),
+    [
+        ("admitted", "failed"),
+        ("admitted", "suppressed"),
+        ("failed", "suppressed"),
+    ],
+)
+def test_conflicting_terminal_traces_fail_closed_in_both_orders(
+    first_status: str,
+    second_status: str,
+) -> None:
+    intent_id = uuid4()
+    statuses = (first_status, second_status)
+    mapping = {1: 1} if "admitted" in statuses else {}
+    for ordered_statuses in (statuses, tuple(reversed(statuses))):
+        traces = tuple(
+            _trace(
+                intent_id=intent_id,
+                admission_status=status,
+                suppress_reason=("room_closed" if status == "suppressed" else None),
+            )
+            for status in ordered_statuses
+        )
+
+        with pytest.raises(ValueError, match="conflicting terminal traces"):
+            build_room_dm_metrics(traces, (), mapping)
+
+
 def test_aggregate_metrics_preserves_global_ratio_and_max_lag() -> None:
     first = DMMetrics(
         template_admitted=2,

@@ -200,6 +200,19 @@ def test_catalog_rejects_undeclared_and_missing_placeholders() -> None:
         )
 
 
+def test_catalog_rejects_speak_claim_marker() -> None:
+    with pytest.raises(ValueError, match="UNSAFE_TEMPLATE_TEXT"):
+        TemplateVariant(
+            template_variant_id="bad",
+            category="DEATH_NOTICE",
+            channel="public",
+            style="formal",
+            template_text="SPEAK {seat_ids} 出局。",
+            allowed_fact_kinds=frozenset({"player_died"}),
+            placeholders=frozenset({"seat_ids"}),
+        )
+
+
 def test_catalog_rejects_variant_id_mismatch_and_unknown_fact_kind() -> None:
     variants = _default_variants()
     with pytest.raises(ValidationError):

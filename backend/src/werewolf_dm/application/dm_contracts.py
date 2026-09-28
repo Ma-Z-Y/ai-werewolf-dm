@@ -428,6 +428,7 @@ _FACT_FIELDS: dict[str, frozenset[str]] = {
     "game_ended": frozenset({"winner_label"}),
 }
 _UNSAFE_CONTROL_PATTERN = re.compile("[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]")
+_CLAIM_MARKER_PATTERN = re.compile("声称|SPEAK|SPEECH", re.IGNORECASE)
 _ALLOWED_PUNCTUATION = frozenset(
     " \t\n"
     "{}:,.!?;()[]-_%/"
@@ -446,6 +447,8 @@ def _template_placeholders(template_text: str) -> frozenset[str]:
 
 def validate_template_text(template_text: str) -> None:
     if _UNSAFE_CONTROL_PATTERN.search(template_text):
+        raise ValueError("UNSAFE_TEMPLATE_TEXT")
+    if _CLAIM_MARKER_PATTERN.search(template_text):
         raise ValueError("UNSAFE_TEMPLATE_TEXT")
     if any(
         unicodedata.category(character).startswith("C")
