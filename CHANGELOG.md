@@ -5,6 +5,10 @@
 
 ## Unreleased
 
+_暂无变更。_
+
+## 0.3.0 - 2026-09-28
+
 ### Added
 
 - S1 Headless 规则核心、严格领域模型、投影、回放和确定性模拟。
@@ -45,6 +49,9 @@
 - S4-07 生产 `SEAT_PROMPT`：夜阶段为存活狼人、预言家和女巫生成座位槽，
   仅向当前 seat session 投递；离线槽安全完成且不阻塞后续槽，同时删除
   E2E-only seat-message injection。
+- S4-07 admission hardening：显式 intent 必须严格重校验并匹配 outbox
+  audience；缺失 item、非法 intent 和 audience mismatch 都在任何状态
+  变更前 fail closed。
 
 ### Security
 
@@ -59,3 +66,9 @@
 - S4 DM 渲染继续执行 public/seat 分区；浏览器 E2E 阻断 provider 与非
   loopback 外联。生产 `SEAT_PROMPT` 已由 `RoomActor` 从领域 outbox
   生成，浏览器证据直接消费真实 seat 消息；provider/LLM 仍未启用。
+
+## 0.2.0
+
+### Changed
+
+- 包版本与应用健康检查版本统一为 `0.2.0`。
