@@ -25,6 +25,15 @@ v1.5.6 / v1.1.6 进一步要求显式 intent 严格重校验，非法 channel �
 7. [S3 前端与协议预检设计 v1.1](2026-09-25-s3-frontend-design.md)
 8. [S4 AI DM 设计 v1.1.6](2026-09-26-s4-ai-dm-design.md)
 9. [S4 AI DM 产品宪法 v1.1](2026-09-26-s4-ai-dm-constitution.md)
+10. [主持人纠错与最小持久化设计草案 v0.1.0](2026-09-28-host-recovery-persistence-design.md)
+
+## P1 Proposed
+
+- [主持人纠错与最小持久化设计草案 v0.1.0](2026-09-28-host-recovery-persistence-design.md)
+  - 状态：`proposed`
+  - 将冻结规格中的 `HOST_PATCH`、快照回退、强制模板、SQLite 快照、
+    事件日志和 token digest 恢复整理成上线前 P1 范围。
+  - 本轮不授权代码实现；评审第 12 节决策后再生成 TDD implementation plan。
 
 ## S4 Current
 
