@@ -33,7 +33,11 @@ v1.5.6 / v1.1.6 进一步要求显式 intent 严格重校验，非法 channel �
   - 状态：`proposed`
   - 将冻结规格中的 `HOST_PATCH`、快照回退、强制模板、SQLite 快照、
     事件日志和 token digest 恢复整理成上线前 P1 范围。
-  - 本轮不授权代码实现；评审第 12 节决策后再生成 TDD implementation plan。
+  - 对应逐任务 TDD 计划：
+    `docs/superpowers/plans/2026-09-28-host-recovery-persistence.md`。
+  - 复核状态：`blocked`；已关闭两轮架构问题，但 rewind epoch/domain seq、
+    普通命令事务回滚和 `SnapshotReason` 触发契约仍需下一轮确认。
+  - 本轮不授权代码实现；评审第 12 节五项决策并关闭阻塞后再执行计划。
 
 ## S4 Current
 

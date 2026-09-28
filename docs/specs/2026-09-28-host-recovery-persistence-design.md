@@ -9,6 +9,10 @@ supersedes: null
 
 # 主持人纠错与最小持久化设计草案
 
+**评审状态：** `proposed / implementation-plan-blocked`。独立 architect 已
+完成两轮只读复验；在 rewind epoch/domain seq、普通命令事务回滚和
+SnapshotReason 触发契约确认前，计划不得执行。
+
 ## 1. 目标
 
 本阶段补齐上线前两项 P1 能力：
@@ -19,7 +23,8 @@ supersedes: null
    使局域网朋友局不会因笔记本休眠或误关进程直接丢失整局。
 
 本草案只解决产品范围和架构边界，不授权实现代码。实现必须在本草案评审
-通过后另立 TDD implementation plan。
+通过后按 `docs/superpowers/plans/2026-09-28-host-recovery-persistence.md`
+执行。
 
 ## 2. 权威基线
 
@@ -132,6 +137,11 @@ P1 需要持久化：
 - host/seat/display 令牌摘要、角色、座位、session_id 和到期时间。
 - 当前 `GameState`、revision、event_count 和 event_log_digest。
 - 已经落账的 `DomainEvent`。
+- `RoomActor` 的运行态：`outbox_seq`、domain-to-transport mapping、
+  completed/processed announcement seq、已发布消息/admission 摘要、
+  `next_domain_seq`、`recovery_epoch` 和 discarded-command tombstones。
+- `GameCore` 的命令去重结果，以及 `dm_trace` 和 `dm_transport_trace`
+  两个通道。
 - 阶段开始、暂停、纠错前和终局的 host-only 快照。
 - 主持人纠错审计记录和拒绝记录。
 
@@ -140,7 +150,7 @@ P1 需要持久化：
 1. 打开 SQLite 并执行 schema migration。
 2. 加载未过期房间和令牌记录。
 3. 用持久化状态和事件重建 `GameCore`。
-4. 重建 `RoomActor`、TimerScheduler 和订阅空集合。
+4. 重建 `RoomActor`、TimerScheduler、outbox/DM admission 状态和订阅空集合。
 5. 恢复未过期 display session，但不恢复旧 WebSocket 连接。
 6. 启动 reaper 和 room actor。
 
@@ -164,10 +174,34 @@ rooms
 
 room_events
   room_id
+  event_ordinal
   revision
   event_id
   event_json
-  PRIMARY KEY(room_id, revision, event_id)
+  PRIMARY KEY(room_id, event_ordinal)
+
+command_results
+  room_id
+  command_id
+  actor_type
+  actor_key
+  result_json
+  PRIMARY KEY(room_id, command_id, actor_type, actor_key)
+
+dm_traces
+  room_id
+  trace_id
+  revision
+  trace_kind
+  trace_json
+  PRIMARY KEY(room_id, trace_id)
+
+room_runtime
+  room_id PK
+  outbox_seq
+  next_domain_seq
+  recovery_epoch
+  runtime_json
 
 room_snapshots
   snapshot_id PK
@@ -210,11 +244,13 @@ Schema 只存 token digest，不存 token 原文。密码、API key、真实个�
 每个会改变状态的命令都必须在同一个 SQLite 事务中完成：
 
 1. 写入新 `rooms.state_json`、revision 和 event digest。
-2. 追加 `room_events`。
-3. 写入必要快照。
-4. 写入 host recovery audit（如果适用）。
-5. 清理或更新相关 token / display pairing。
-6. 事务提交。
+2. 按 `event_ordinal` 追加 `room_events`；普通命令、超时、公告消费和
+   视图发布也必须走同一持久化协调边界。
+3. 写入命令去重结果、模板 trace 和 `RoomActor` runtime 摘要。
+4. 写入必要快照。
+5. 写入 host recovery audit（如果适用）。
+6. 清理或更新相关 token / display pairing。
+7. 事务提交。
 
 任一步失败：
 
@@ -254,8 +290,9 @@ create_app lifespan
 - 纠错必须先暂停；UI 显示当前 revision、待修正字段和确认原因。
 - 成功后以最新 host control/public/seat 视图为准。
 - 失败时保留输入并显示安全错误码，不显示服务端内部消息。
-- `HOST_FORCE_TEMPLATE` 在当前 template-only 系统中只记录强制模板请求并
-  重算当前模板消息，不声称启用了 provider。
+- `HOST_FORCE_TEMPLATE` 在当前 template-only 系统中只写入幂等
+  host-only 审计记录，不创建 domain event、不增加 revision/outbox，
+  也不声称启用了 provider。
 
 ## 10. 非目标
 
@@ -276,20 +313,34 @@ create_app lifespan
 - `REC-013` 纠错事务中途失败时全部回滚。
 - `E2E-007` 主持人暂停纠错后所有客户端同步恢复。
 - 进程重启后：seat/host/display token 重连、revision 连续、事件完整、
-  `GAME_END` 前状态可继续。
+  `outbox_seq` 不重置、DM admission/processed 状态不重复、command
+  dedupe 结果可重放，且 `GAME_END` 前状态可继续。
+- 同一 revision 多事件的加载顺序由 `event_ordinal` 决定，重启前后
+  `event_log_digest` 不变。
 - 数据库损坏或单局恢复失败不阻塞其他房间。
 - token 原文、隐藏角色、private facts、raw events 不进入公共视图。
 
-## 12. 待评审决策
+## 12. P1 plan 采用的安全默认值
 
-以下决策需要用户明确后再进入 implementation plan：
+implementation plan 采用以下 P1 默认值；这些默认值仍需用户批准后才能冻结
+实现：
 
-1. `HOST_REWIND_TO_SNAPSHOT` 的 P1 语义是否只允许回到纠错前快照，
-   还是允许选择任意历史快照。
-2. SQLite 默认路径使用本地项目数据目录，还是运行时环境变量指定。
-3. `HOST_FORCE_TEMPLATE` 在 template-only 系统中是否允许成为无副作用
-   audit 记录，还是继续保持拒绝。
-4. 快照回退后是否保留完整历史分段，还是只保留 host-only 恢复记录。
+1. `HOST_REWIND_TO_SNAPSHOT` 必须精确匹配 `snapshot_id`。P1 只允许
+   room 相同且 reason=`PRE_CORRECTION` 的最新快照；不存在、跨房间、
+   非纠错前或不是最新快照时 fail closed。
+2. SQLite 路径优先读取 `WEREWOLF_DM_DB_PATH`；未设置时使用项目本地
+   data 目录，并创建父目录。
+3. `HOST_FORCE_TEMPLATE` 是幂等、audit-only 的控制命令：不进入 domain
+   event log、不增加 revision、不增加 outbox_seq、不启用 provider，
+   只记录 host-only 审计并确保后续播报仍走模板。
+4. 原始事件永久保留，新增 `event_ordinal` 保持同 revision 内顺序。
+   rewind 只恢复状态载荷，保留当前全局事件流和计数，追加 host-only
+   `HOST_REWIND_APPLIED`，revision 设置为 current+1。
+5. rewind 增加 `recovery_epoch`，清空快照 revision 之后的 transport
+   mapping、completed/processed seq、published messages 和 command dedupe；
+   丢弃分支的命令 ID 写入 tombstone，重试时返回新的
+   `COMMAND_VOIDED_BY_REWIND`。新的 domain/outbox 序号从
+   `next_domain_seq` 全局水位继续。
 
 ## 13. 建议实施顺序
 
@@ -300,5 +351,6 @@ create_app lifespan
 5. 前端主持人纠错面板。
 6. 重启恢复、跨层隐私和端到端门禁。
 
-本阶段不直接进入代码实现。下一步应先评审第 12 节决策，再生成逐任务
-TDD implementation plan。
+本阶段不直接进入代码实现。实现计划已经生成，但独立 architect 复验仍为
+`BLOCK`，不得执行；待第 12 节五项决策确认并关闭剩余阻塞后再进入下一轮
+计划复核。
