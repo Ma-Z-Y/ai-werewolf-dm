@@ -57,12 +57,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if owns_registry:
         app.state.room_registry = build_production_registry()
         registry = cast(RoomRegistry, app.state.room_registry)
-        reaper_task = asyncio.create_task(
-            reap_periodically(
-                registry,
-                interval_seconds=app.state.reaper_interval_seconds,
+        try:
+            await registry.start_rooms()
+        except BaseException:
+            await registry.close(close_store=True)
+            app.state.room_registry = None
+            raise
+        else:
+            reaper_task = asyncio.create_task(
+                reap_periodically(
+                    registry,
+                    interval_seconds=app.state.reaper_interval_seconds,
+                )
             )
-        )
     try:
         yield
     finally:

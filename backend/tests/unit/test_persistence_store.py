@@ -39,6 +39,7 @@ TRACE_ID = UUID("20000000-0000-0000-0000-000000000001")
 TRANSPORT_TRACE_ID = UUID("20000000-0000-0000-0000-000000000002")
 INTENT_ID = UUID("30000000-0000-0000-0000-000000000001")
 PUBLISHED_MESSAGE_ID = UUID("40000000-0000-0000-0000-000000000001")
+SECOND_PUBLISHED_MESSAGE_ID = UUID("40000000-0000-0000-0000-000000000002")
 SNAPSHOT_ID = UUID("50000000-0000-0000-0000-000000000001")
 AUDIT_ID = UUID("60000000-0000-0000-0000-000000000001")
 CREATED_AT = datetime(2026, 9, 28, tzinfo=UTC)
@@ -157,7 +158,7 @@ def sample_runtime() -> PersistedRoomRuntime:
         domain_to_transport={1: 1, 2: 3},
         completed_domain_seqs=(1, 2),
         processed_announcement_seq=2,
-        published_message_ids=(PUBLISHED_MESSAGE_ID,),
+        published_message_ids=(PUBLISHED_MESSAGE_ID, SECOND_PUBLISHED_MESSAGE_ID),
         next_domain_seq=4,
         recovery_epoch=2,
         discarded_command_tombstones=(sample_command_key(),),

@@ -108,12 +108,24 @@ class PersistedRoomRuntime(StrictModel):
     def freeze_runtime(self) -> Self:
         if any(domain_seq < 1 for domain_seq in self.domain_to_transport):
             raise ValueError("domain_to_transport keys must be positive")
-        if any(transport_seq < 0 for transport_seq in self.domain_to_transport.values()):
-            raise ValueError("domain_to_transport values must be non-negative")
+        transport_seqs = tuple(self.domain_to_transport.values())
+        if any(transport_seq < 1 for transport_seq in transport_seqs):
+            raise ValueError("domain_to_transport values must be positive")
+        if len(set(transport_seqs)) != len(transport_seqs):
+            raise ValueError("domain_to_transport values must be unique")
+        if transport_seqs and max(transport_seqs) > self.outbox_seq:
+            raise ValueError("outbox_seq must cover every transport mapping")
         if any(domain_seq < 1 for domain_seq in self.completed_domain_seqs):
             raise ValueError("completed domain sequences must be positive")
         if len(set(self.completed_domain_seqs)) != len(self.completed_domain_seqs):
             raise ValueError("completed domain sequences must be unique")
+        if not set(self.domain_to_transport).issubset(self.completed_domain_seqs):
+            raise ValueError("mapped domain sequences must be completed")
+        latest_completed = max(self.completed_domain_seqs, default=0)
+        if self.processed_announcement_seq != latest_completed:
+            raise ValueError("processed announcement sequence must match completed state")
+        if len(self.domain_to_transport) != len(self.published_message_ids):
+            raise ValueError("published message ids must match transport mapping")
         if len(set(self.published_message_ids)) != len(self.published_message_ids):
             raise ValueError("published message ids must be unique")
         if len(set(self.discarded_command_tombstones)) != len(self.discarded_command_tombstones):

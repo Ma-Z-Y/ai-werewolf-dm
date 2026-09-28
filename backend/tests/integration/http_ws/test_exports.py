@@ -429,6 +429,66 @@ def test_registry_restart_restores_views_and_command_dedupe(tmp_path: Path) -> N
     reopened_store.close()
 
 
+def test_app_owned_restart_starts_restored_room_for_websocket(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "app-restart.sqlite3"
+    monkeypatch.setenv("WEREWOLF_DM_DB_PATH", str(database_path))
+
+    first_app = create_app()
+    with TestClient(first_app) as client:
+        created = client.post("/rooms", json={"display_name": "Host"})
+        assert created.status_code == 201
+        room = created.json()
+        joined = client.post(
+            f"/rooms/{room['room_code']}/join",
+            json={"display_name": "Alice"},
+        )
+        assert joined.status_code == 200
+        joined_room = joined.json()
+
+    second_app = create_app()
+    with TestClient(second_app) as client, client.websocket_connect("/ws") as socket:
+        assert socket.receive_json()["type"] == "auth.required"
+        socket.send_json(
+            {
+                "type": "auth",
+                "token": joined_room["seat_token"],
+                "last_seq": 0,
+            }
+        )
+        assert socket.receive_json()["type"] == "session.ready"
+        command_id = uuid4()
+        socket.send_json(
+            {
+                "type": "command",
+                "command": {
+                    "schema_version": "command.v1",
+                    "command_id": str(command_id),
+                    "room_id": room["room_id"],
+                    "expected_revision": 0,
+                    "issued_at": _START.isoformat(),
+                    "payload": {
+                        "command_type": "JOIN_ROOM",
+                        "seat_id": 1,
+                        "display_name": "Alice",
+                    },
+                },
+            }
+        )
+        ack = next(
+            message
+            for message in (socket.receive_json() for _ in range(4))
+            if message["type"] == "command.ack"
+        )
+
+    assert ack["type"] == "command.ack"
+    assert ack["command_id"] == str(command_id)
+    assert ack["accepted"] is True
+    assert ack["revision"] == 1
+
+
 def test_restart_preserves_outbox_admission_and_audit_trace(tmp_path: Path) -> None:
     database_path = tmp_path / "admission.sqlite3"
     scenario = core_at_wolf()
@@ -469,7 +529,7 @@ def test_restart_preserves_outbox_admission_and_audit_trace(tmp_path: Path) -> N
         domain_to_transport={seq: index for index, seq in enumerate(outbox_seqs, start=1)},
         completed_domain_seqs=outbox_seqs,
         processed_announcement_seq=max(outbox_seqs),
-        published_message_ids=(uuid4(),),
+        published_message_ids=tuple(uuid4() for _ in outbox_seqs),
         next_domain_seq=max(outbox_seqs) + 1,
         recovery_epoch=9,
         discarded_command_tombstones=(),
@@ -745,6 +805,55 @@ def test_registry_restart_skips_corrupt_room_without_blocking_other_rooms(
         connection.execute(
             "UPDATE rooms SET state_json = ? WHERE room_code = ?",
             ("{", corrupt.room_code),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    reopened_store, reopened = _open_registry(database_path)
+
+    assert healthy.room_code in reopened.rooms
+    assert corrupt.room_code not in reopened.rooms
+    reopened_store.close()
+
+
+def test_registry_restart_skips_only_room_with_corrupt_runtime(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "corrupt-runtime.sqlite3"
+    room_ids = iter((UUID(int=601), UUID(int=602)))
+    store, registry = _open_registry(
+        database_path,
+        tokens=("host-one", "host-two"),
+        room_codes=("ROOM01", "ROOM02"),
+        uuid_source=lambda: next(room_ids),
+    )
+    corrupt = registry.create_room(_TOKEN_TTL)
+    healthy = registry.create_room(_TOKEN_TTL)
+    runtime = PersistedRoomRuntime(
+        outbox_seq=1,
+        domain_to_transport={1: 1},
+        completed_domain_seqs=(1,),
+        processed_announcement_seq=1,
+        published_message_ids=(uuid4(),),
+        next_domain_seq=2,
+        recovery_epoch=0,
+        discarded_command_tombstones=(),
+    )
+    store.save_room_runtime(corrupt.room_id, runtime)
+    store.save_room_runtime(healthy.room_id, runtime)
+    corrupt_runtime = runtime.model_dump(mode="json")
+    corrupt_runtime["outbox_seq"] = 0
+    store.close()
+
+    connection = sqlite3.connect(database_path)
+    try:
+        connection.execute(
+            "UPDATE room_runtime SET runtime_json = ? WHERE room_id = ?",
+            (
+                json.dumps(corrupt_runtime, separators=(",", ":")),
+                str(corrupt.room_id),
+            ),
         )
         connection.commit()
     finally:

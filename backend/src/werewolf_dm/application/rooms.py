@@ -249,11 +249,14 @@ class RoomSubscriber(Protocol):
         raise NotImplementedError
 
 
+RoomCommandErrorCode = CommandErrorCode | Literal["COMMAND_VOIDED_BY_REWIND"]
+
+
 class RoomCommandAck(StrictModel):
     command_id: UUID
     accepted: bool
     revision: int
-    error_code: CommandErrorCode | Literal["COMMAND_VOIDED_BY_REWIND"] | None = None
+    error_code: RoomCommandErrorCode | None = None
     outbox_seq: int
 
 
@@ -2037,6 +2040,10 @@ class RoomRegistry:
     async def start_room(self, room_code: str) -> None:
         actor = self.get_by_code(room_code)
         await actor.start()
+
+    async def start_rooms(self) -> None:
+        for actor in tuple(self.rooms.values()):
+            await actor.start()
 
     async def remove_room(self, room_code: str) -> None:
         actor = self.rooms.get(room_code)

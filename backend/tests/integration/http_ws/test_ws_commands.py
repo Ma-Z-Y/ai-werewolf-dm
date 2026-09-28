@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -7,7 +8,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from werewolf_dm.application.core import FrozenClock
-from werewolf_dm.application.rooms import RoomRegistry, SequenceTokenSource
+from werewolf_dm.application.rooms import (
+    RoomRegistry,
+    SequenceTokenSource,
+    SubmitCommandEvent,
+)
 from werewolf_dm.domain.contracts import (
     CommandEnvelope,
     CommandErrorCode,
@@ -146,6 +151,70 @@ async def test_legal_command_returns_exact_command_ack() -> None:
     }
     assert "event_ids" not in ack
     assert registry.rooms == {}
+
+
+@pytest.mark.asyncio
+async def test_stale_epoch_command_ack_reaches_production_websocket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = make_registry()
+    created = registry.create_room(ttl=timedelta(hours=1))
+    joined = registry.join_room(created.room_code, "Alice")
+    await registry.start_room(created.room_code)
+    room = registry.get_by_code(created.room_code)
+    command_id = uuid4()
+
+    async def stale_submit(
+        envelope: CommandEnvelope,
+        actor: object,
+    ):
+        del actor
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
+        room.recovery_epoch = 1
+        await room.events.put(
+            SubmitCommandEvent(
+                envelope=envelope,
+                actor=room_registry_actor(room),
+                result=future,
+                recovery_epoch=0,
+            )
+        )
+        return await future
+
+    def room_registry_actor(room_actor):
+        return registry.actor_for(registry.tokens.resolve(joined.seat_token))
+
+    monkeypatch.setattr(room, "submit_command", stale_submit)
+    socket = ScriptedSocket(
+        [
+            command_message(
+                created.room_id,
+                HostPauseCommand(reason="stale"),
+                command_id=command_id,
+                expected_revision=0,
+            )
+        ]
+    )
+    sink = ConnectionSink(socket, clock=registry.clock)
+
+    await run_scripted_message_loop(
+        socket,
+        sink,
+        registry,
+        created.room_code,
+        joined.seat_token,
+    )
+
+    assert socket.sent == [
+        {
+            "type": "command.ack",
+            "command_id": str(command_id),
+            "accepted": False,
+            "revision": 0,
+            "error_code": "COMMAND_VOIDED_BY_REWIND",
+            "outbox_seq": 0,
+        }
+    ]
 
 
 @pytest.mark.asyncio

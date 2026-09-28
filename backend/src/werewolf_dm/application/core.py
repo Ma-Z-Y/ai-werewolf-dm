@@ -232,6 +232,16 @@ class GameCore:
         revisions = tuple(event.revision for event in restored_events)
         if revisions != tuple(sorted(revisions)):
             raise ValueError("restored events must be ordered by revision")
+        previous_revision: int | None = None
+        for revision in revisions:
+            if previous_revision is None:
+                previous_revision = revision
+                continue
+            if revision == previous_revision:
+                continue
+            if revision != previous_revision + 1:
+                raise ValueError("restored event revisions must be continuous")
+            previous_revision = revision
         if state.event_count != len(restored_events):
             raise ValueError("restored state event_count does not match history")
         if state.event_log_digest != event_log_digest(restored_events):

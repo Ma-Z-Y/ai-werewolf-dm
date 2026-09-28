@@ -331,3 +331,32 @@ def test_event_log_digest_matches_restored_events() -> None:
 
     assert result.final_state.event_count == len(result.events)
     assert result.final_state.event_log_digest == event_log_digest(result.events)
+
+
+def test_game_core_restore_rejects_missing_event_revision() -> None:
+    result = replay(ROOM_ID, seed=101, steps=minimal_night_script())
+    jump_index = next(
+        index
+        for index, event in enumerate(result.events[1:], start=1)
+        if event.revision > result.events[index - 1].revision
+    )
+    modified_events = tuple(
+        event.model_copy(update={"revision": event.revision + (1 if index >= jump_index else 0)})
+        for index, event in enumerate(result.events)
+    )
+    modified_state = result.final_state.model_copy(
+        update={
+            "revision": result.final_state.revision + 1,
+            "event_count": len(modified_events),
+            "event_log_digest": event_log_digest(modified_events),
+        }
+    )
+
+    with pytest.raises(ValueError, match="revision"):
+        GameCore.restore(
+            room_id=ROOM_ID,
+            seed=101,
+            clock=FrozenClock(minimal_night_script()[-1].now),
+            state=modified_state,
+            events=modified_events,
+        )
