@@ -461,6 +461,27 @@ async def test_seat_session_rebinding_rejects_old_session_binding() -> None:
 
 
 @pytest.mark.asyncio
+async def test_explicit_intent_rejects_invalid_channel_before_state_change() -> None:
+    actor = _actor(_core_with_wolf_win(poison_good=False))
+    domain_seq = _current_public_dm_seq(actor)
+    intent, facts = _public_intent_and_facts(actor, domain_seq=domain_seq)
+    payload = intent.model_dump()
+    payload["channel"] = "bogus"
+    malformed = TemplateIntent.model_construct(**payload)
+    before_completed = set(actor._completed_domain_seqs)
+    before_processed = actor.processed_announcement_seq
+    before_traces = list(actor.dm_trace)
+
+    with pytest.raises(ValueError, match="ANNOUNCEMENT_INTENT_INVALID"):
+        await actor.admit(_slot(actor, domain_seq), intent=malformed, facts=facts)
+
+    assert actor._completed_domain_seqs == before_completed
+    assert actor.processed_announcement_seq == before_processed
+    assert actor.dm_trace == before_traces
+    assert actor.domain_to_transport == {}
+
+
+@pytest.mark.asyncio
 async def test_public_message_is_not_invalidated_by_seat_rebinding() -> None:
     actor = _actor(_core_exile_last_wolf(), now=datetime(2026, 9, 27, tzinfo=UTC))
     await actor.start()

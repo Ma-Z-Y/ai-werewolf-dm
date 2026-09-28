@@ -1,6 +1,6 @@
 ---
 spec_id: s4-ai-dm-design
-version: 1.1.5
+version: 1.1.6
 status: frozen
 proposed_at: 2026-09-27
 frozen_at: 2026-09-28
@@ -11,7 +11,7 @@ depends_on:
   - s2-realtime-interface-design@1.2.0
   - s3-frontend-constitution@1.1.0
   - s4-ai-dm-constitution@1.1.0
-  - verification-matrix@1.5.5
+  - verification-matrix@1.5.6
 overrides:
   - target: system-design@1.1.0#4
     scope: S4 dm_trace is clipped to template metadata and no raw diagnostics leave memory.
@@ -25,10 +25,10 @@ overrides:
     scope: S4 active admission is template-only; 2.0s remains the absolute ceiling.
   - target: system-design@1.1.0#12
     scope: S4 host audit exports clipped template trace only.
-supersedes: s4-ai-dm-design@1.1.4
+supersedes: s4-ai-dm-design@1.1.5
 ---
 
-# S4 AI DM 设计 v1.1.5
+# S4 AI DM 设计 v1.1.6
 
 ## 1. 状态与效力
 
@@ -480,8 +480,10 @@ offline、duplicate 或 stale 短路之前，必须校验 slot 对应的
 `OutboxItem` 存在，且 intent channel/seat audience 与
 `OutboxItem.audience_seat_id` 完全一致。缺失 item 使用
 `ANNOUNCEMENT_ITEM_NOT_FOUND`，audience 不一致使用
-`ANNOUNCEMENT_AUDIENCE_MISMATCH` fail closed；两种失败都不得发布、
-建立 `domain_to_transport`、写 trace，或推进 completed/processed
+`ANNOUNCEMENT_AUDIENCE_MISMATCH` fail closed。显式 intent 必须先通过
+`TemplateIntent` 的严格重校验，非法 channel、audience cardinality 或
+字段类型使用 `ANNOUNCEMENT_INTENT_INVALID` fail closed。所有失败都不得
+发布、建立 `domain_to_transport`、写 trace，或推进 completed/processed
 状态。
 
 若 seat-targeted slot 在 admission 时没有当前 actor-owned session，则该
@@ -662,6 +664,15 @@ provider schema/refusal/truncation 和 raw prompt/output 测试全部 deferred�
 降低门禁必须提升产品规格版本并获得用户确认。
 
 ## 16. 变更历史
+
+### v1.1.6 - 2026-09-28
+
+- 显式 intent admission 在读取 channel/audience 前必须通过严格重校验；
+  非法 channel、audience cardinality 或字段类型以
+  `ANNOUNCEMENT_INTENT_INVALID` fail closed，且不得触碰 completed、
+  processed、trace 或 transport 状态。
+- 补充非法 channel 负回归，并将 processed 状态不变断言加入显式 intent
+  的失败路径。
 
 ### v1.1.5 - 2026-09-28
 

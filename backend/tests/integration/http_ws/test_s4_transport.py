@@ -237,11 +237,13 @@ async def test_explicit_seat_intent_must_match_offline_outbox_audience() -> None
         seat_id=other_seat_id,
         session_id=session_id,
     )
+    before_processed = actor.processed_announcement_seq
 
     with pytest.raises(ValueError, match="ANNOUNCEMENT_AUDIENCE_MISMATCH"):
         await actor.admit(_slot(actor, item.seq), intent=intent, facts=facts)
 
     assert item.seq not in actor._completed_domain_seqs
+    assert actor.processed_announcement_seq == before_processed
     assert actor.dm_trace == []
     assert actor.published_messages == []
     await actor.stop()
@@ -270,11 +272,13 @@ async def test_explicit_intent_requires_an_existing_outbox_item() -> None:
         session_id=session_id,
     )
     missing_seq = max(outbox_item.seq for outbox_item in scenario.core.state.outbox) + 1
+    before_processed = actor.processed_announcement_seq
 
     with pytest.raises(ValueError, match="ANNOUNCEMENT_ITEM_NOT_FOUND"):
         await actor.admit(_slot(actor, missing_seq), intent=intent, facts=facts)
 
     assert missing_seq not in actor._completed_domain_seqs
+    assert actor.processed_announcement_seq == before_processed
     assert actor.dm_trace == []
     assert actor.domain_to_transport == {}
     await actor.stop()
@@ -305,11 +309,13 @@ async def test_explicit_intent_rejects_malformed_seat_audience() -> None:
     payload = intent.model_dump()
     payload["audience_seat_ids"] = ()
     malformed = TemplateIntent.model_construct(**payload)
+    before_processed = actor.processed_announcement_seq
 
-    with pytest.raises(ValueError, match="ANNOUNCEMENT_AUDIENCE_MISMATCH"):
+    with pytest.raises(ValueError, match="ANNOUNCEMENT_INTENT_INVALID"):
         await actor.admit(_slot(actor, item.seq), intent=malformed, facts=facts)
 
     assert item.seq not in actor._completed_domain_seqs
+    assert actor.processed_announcement_seq == before_processed
     assert actor.dm_trace == []
     await actor.stop()
 

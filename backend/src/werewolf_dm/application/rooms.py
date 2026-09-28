@@ -12,7 +12,7 @@ from time import monotonic_ns
 from typing import Literal, Protocol, Self
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
-from pydantic import Field, model_validator
+from pydantic import Field, ValidationError, model_validator
 
 from werewolf_dm.application.core import Clock, GameCore
 from werewolf_dm.application.dm_contracts import (
@@ -530,14 +530,11 @@ class RoomActor:
         if intent is not None:
             if slot_item is None:
                 raise ValueError("ANNOUNCEMENT_ITEM_NOT_FOUND")
-            if intent.channel == "seat":
-                if len(intent.audience_seat_ids) != 1:
-                    raise ValueError("ANNOUNCEMENT_AUDIENCE_MISMATCH")
-                intent_seat_id = intent.audience_seat_ids[0]
-            else:
-                if intent.audience_seat_ids:
-                    raise ValueError("ANNOUNCEMENT_AUDIENCE_MISMATCH")
-                intent_seat_id = None
+            try:
+                intent = TemplateIntent.revalidate(intent)
+            except ValidationError as error:
+                raise ValueError("ANNOUNCEMENT_INTENT_INVALID") from error
+            intent_seat_id = intent.audience_seat_ids[0] if intent.channel == "seat" else None
             if intent_seat_id != slot_item.audience_seat_id:
                 raise ValueError("ANNOUNCEMENT_AUDIENCE_MISMATCH")
             explicit_candidate = (

@@ -1,6 +1,6 @@
 # 规格索引
 
-当前冻结基线为验证矩阵 v1.5.5 / S4 design v1.1.5 / S4 constitution
+当前冻结基线为验证矩阵 v1.5.6 / S4 design v1.1.6 / S4 constitution
 v1.1：
 
 S1、S2、S3 历史基线由 v1.3 提供；v1.4 新增 LLM 路径候选规格；v1.5
@@ -11,26 +11,28 @@ S1、S2、S3 历史基线由 v1.3 提供；v1.4 新增 LLM 路径候选规格；
 ineligible completion 和显式 audience mismatch fail-closed。v1.5.5 /
 v1.1.5 进一步规定显式 intent 的 outbox item 存在性与 audience
 一致性校验先于 offline/duplicate/stale 短路，并增加 stale-session 负回归。
+v1.5.6 / v1.1.6 进一步要求显式 intent 严格重校验，非法 channel 以
+`ANNOUNCEMENT_INTENT_INVALID` 在任何状态变更前 fail closed。
 查询修订为结构化 `TemplateVariantKey -> select()`，并把 SHA-256 digest
 降为独立纯函数，只用于 trace、日志关联和跨实例校验。
 
 1. [产品宪法](2026-09-23-product-constitution.md)
 2. [RulePack v1](2026-09-23-rulepack-v1.md)
 3. [系统设计](2026-09-23-system-design.md)
-4. [验证矩阵 v1.5.5](2026-09-23-verification-matrix.md)
+4. [验证矩阵 v1.5.6](2026-09-23-verification-matrix.md)
 5. [S2 实时接口层设计 v1.2](2026-09-24-s2-realtime-interface-design.md)
 6. [S3 前端产品宪法 v1.1](2026-09-25-s3-frontend-constitution.md)
 7. [S3 前端与协议预检设计 v1.1](2026-09-25-s3-frontend-design.md)
-8. [S4 AI DM 设计 v1.1.5](2026-09-26-s4-ai-dm-design.md)
+8. [S4 AI DM 设计 v1.1.6](2026-09-26-s4-ai-dm-design.md)
 9. [S4 AI DM 产品宪法 v1.1](2026-09-26-s4-ai-dm-constitution.md)
 
 ## S4 Current
 
-- [验证矩阵 v1.5.5](2026-09-23-verification-matrix.md)
+- [验证矩阵 v1.5.6](2026-09-23-verification-matrix.md)
   - 状态：`frozen`
   - 当前 S4 只验收模板路由、渲染、隐私、outbox、恢复和延迟；
     provider/LLM 行标记为 deferred。
-- [S4 AI DM 设计 v1.1.5](2026-09-26-s4-ai-dm-design.md)
+- [S4 AI DM 设计 v1.1.6](2026-09-26-s4-ai-dm-design.md)
   - 状态：`frozen`
   - 描述 template-only registry、renderer、service、metrics、有序 outbox
     和未来 provider 重入附录。
