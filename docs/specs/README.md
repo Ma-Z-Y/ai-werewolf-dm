@@ -35,9 +35,9 @@ v1.5.6 / v1.1.6 进一步要求显式 intent 严格重校验，非法 channel �
     事件日志和 token digest 恢复整理成上线前 P1 范围。
   - 对应逐任务 TDD 计划：
     `docs/superpowers/plans/2026-09-28-host-recovery-persistence.md`。
-  - 用户已于 2026-09-28 批准 P1 实现契约；implementation plan 的第三轮
-    fresh-context 复核为 `BLOCK`，阻塞项登记为 `projectmem #0243`；
-    关闭并复核 `PASS` 前不得执行。
+  - 用户已于 2026-09-28 批准 P1 实现契约；implementation plan 已通过
+    第三轮 fresh-context 复核，`projectmem #0243` 已关闭，可从 Task 1
+    开始执行。
 
 ## S4 Current
 

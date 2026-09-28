@@ -10,9 +10,9 @@ supersedes: null
 
 # 主持人纠错与最小持久化设计草案
 
-**评审状态：** `frozen / implementation-plan-blocked`。用户已于 2026-09-28
-批准 P1 安全默认值；但第三轮 fresh-context 复核仍以 `BLOCK` 结束，并登记
-`projectmem #0243`。实现计划在关闭该 issue 前不得执行。
+**评审状态：** `frozen / implementation-ready`。用户已于 2026-09-28 批准
+P1 安全默认值；实现计划已完成第三轮修订并通过 fresh-context 复核
+`PASS`，`projectmem #0243` 已关闭。
 
 ## 1. 目标
 
@@ -364,5 +364,6 @@ create_app lifespan
 5. 前端主持人纠错面板。
 6. 重启恢复、跨层隐私和端到端门禁。
 
-本阶段不直接进入代码实现。实现计划已经生成，但第三轮 fresh-context 复核
-仍为 `BLOCK`；只有关闭 `projectmem #0243` 并再次复核 `PASS` 后才能执行。
+本阶段不直接进入代码实现。实现计划已通过复核，可按
+`docs/superpowers/plans/2026-09-28-host-recovery-persistence.md`
+从 Task 1 开始执行。

@@ -32,8 +32,8 @@
 
 - [ ] P1 上线前补强：评审
   `docs/specs/2026-09-28-host-recovery-persistence-design.md` 已冻结；
-  TDD implementation plan 第三轮 fresh-context 复核为 `BLOCK`
-  （`projectmem #0243`），关闭阻塞并复核 `PASS` 后进入实现。
+  TDD implementation plan 已通过第三轮 fresh-context 复核，
+  `projectmem #0243` 已关闭，下一步从 Task 1 开始实现。
 - [ ] 后续版本化设计 provider/LLM 重入。
 
 每项任务只有在实现、确定性测试、独立复核和用户验收都完成后才会标记为
