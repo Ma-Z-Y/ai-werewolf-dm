@@ -409,6 +409,7 @@ class OutboxItem(StrictModel):
     kind: Literal["dm.message", "view.updated", "game.ended"]
     event_id: UUID
     revision: int = Field(ge=0)
+    audience_seat_id: int | None = Field(default=None, ge=1, le=6)
 
 
 class GameState(StrictModel):

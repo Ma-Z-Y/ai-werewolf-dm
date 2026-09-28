@@ -36,12 +36,13 @@ S1、S2、S3 历史基线由 v1.3 提供；v1.4 新增 LLM 路径候选规格；
   - 将 D1 至 D8 收窄为 template-only 产品原则、权责边界、信息纪律和
     验收原则。
 
-Template-only implementation plan 已完成；`S4-01` 至 `S4-06` 均已实现、
-通过四路 fresh-context 复核并由用户本地验收。当前最终本地门禁为
-backend `622 passed, 9 skipped`、latency `7 passed, 2 skipped`、
+Template-only implementation plan 已完成；`S4-01` 至 `S4-07` 均已实现、
+通过独立复核并由用户本地验收。当前最终本地门禁为 backend
+`639 passed, 10 skipped`、latency `8 passed, 2 skipped`、
 Vitest `166 passed`、Playwright `14 passed`。生产 `SEAT_PROMPT`
-生成仍为 deferred；seat 浏览器证据来自已批准的 E2E-only injection。
-Next Step 是执行远端 Git 收口并将实现并入受保护的 `main`。
+由 `RoomActor` 从领域 outbox 生成，浏览器证据直接来自真实 seat 消息，
+不再使用 E2E-only injection。Next Step 是 provider/LLM 重入的独立
+版本化设计，不在 S4-07 范围内。
 
 ## S3
 

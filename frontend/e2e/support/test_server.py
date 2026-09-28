@@ -6,15 +6,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 import uvicorn
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
-from werewolf_dm.application.dm_contracts import (
-    DMTemplateMessage,
-    TemplateAudience,
-)
-from werewolf_dm.application.rooms import (
-    DMTemplateMessageUpdate,
-    RoomRegistry,
-    TokenService,
-)
+from werewolf_dm.application.rooms import RoomRegistry, TokenService
 from werewolf_dm.interfaces.http_ws.app import create_app
 
 
@@ -108,10 +100,6 @@ class AdvanceRequest(BaseModel):
     seconds: float = Field(gt=0, le=3600)
 
 
-class SeatDmRequest(BaseModel):
-    seat_id: int = Field(ge=1, le=6)
-
-
 def build_test_control_router(
     room_registry: RoomRegistry,
     test_clock: TestClock,
@@ -168,59 +156,6 @@ def build_test_control_router(
                 now=test_clock(),
             )
         return {"status": "ok"}
-
-    @router.post("/__test__/rooms/{room_code}/seat-dm")
-    async def inject_seat_dm(
-        room_code: str,
-        body: SeatDmRequest,
-        request: Request,
-    ) -> dict[str, str | int]:
-        if request.headers.get("X-Test-Control") != expected_control_token:
-            raise HTTPException(status_code=401, detail="UNAUTHORIZED")
-        room = room_registry.get_by_code(room_code)
-        session_id = room.seat_session_ids.get(body.seat_id)
-        if session_id is None:
-            raise HTTPException(status_code=409, detail="SEAT_NOT_ATTACHED")
-
-        transport_seq = room.outbox_seq + 1
-        room.outbox_seq = transport_seq
-        message = DMTemplateMessage(
-            message_id=uuid5(
-                NAMESPACE_URL,
-                f"{room.room_id}:{room.core.state.revision}:seat:{body.seat_id}",
-            ),
-            room_id=room.room_id,
-            revision=room.core.state.revision,
-            channel="seat",
-            audience_bindings=(
-                TemplateAudience(
-                    seat_id=body.seat_id,
-                    session_id=session_id,
-                ),
-            ),
-            text=f"请 {body.seat_id} 号玩家在 女巫行动 行动。",
-            source="template",
-        )
-        delivered = sum(
-            subscriber.offer(
-                DMTemplateMessageUpdate(
-                    server_time=test_clock(),
-                    outbox_seq=transport_seq,
-                    message=message,
-                )
-            )
-            for subscriber in tuple(room.subscribers.values())
-            if subscriber.actor_type == "seat"
-            and subscriber.seat_id == body.seat_id
-            and "seat" in subscriber.channels
-        )
-        if delivered == 0:
-            raise HTTPException(status_code=409, detail="NO_TARGET_SUBSCRIBER")
-        return {
-            "status": "ok",
-            "message_id": str(message.message_id),
-            "outbox_seq": transport_seq,
-        }
 
     return router
 

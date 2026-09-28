@@ -362,6 +362,10 @@
       2
     ],
     "outbox_kinds": [
+      "dm.message",
+      "dm.message",
+      "dm.message",
+      "dm.message",
       "dm.message"
     ],
     "semantic_assertions": [

@@ -365,6 +365,10 @@
     ],
     "outbox_kinds": [
       "dm.message",
+      "dm.message",
+      "dm.message",
+      "dm.message",
+      "dm.message",
       "game.ended"
     ],
     "semantic_assertions": [

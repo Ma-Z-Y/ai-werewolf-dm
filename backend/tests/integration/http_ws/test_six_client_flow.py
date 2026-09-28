@@ -164,7 +164,12 @@ def receive_json(socket_: ClientConnection) -> dict[str, Any]:
     return cast(dict[str, Any], message)
 
 
-def receive_type(socket_: ClientConnection, expected_type: str) -> dict[str, Any]:
+def receive_type(
+    socket_: ClientConnection,
+    expected_type: str,
+    *,
+    dm_sink: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     while True:
         message = receive_json(socket_)
         if expected_type != "dm.message" and message.get("type") == "dm.message":
@@ -184,6 +189,8 @@ def receive_type(socket_: ClientConnection, expected_type: str) -> dict[str, Any
                 }
             ):
                 raise AssertionError(f"malformed dm.message: {message!r}")
+            if dm_sink is not None:
+                dm_sink.append(message)
             continue
         break
     if message.get("type") != expected_type:
@@ -358,9 +365,12 @@ def receive_broadcasts(
     started_at: float,
     public_count: int,
     latency_ms: list[float],
+    dm_by_seat: dict[int, list[dict[str, Any]]] | None = None,
+    host_dm: list[dict[str, Any]] | None = None,
 ) -> int:
     for seat_index, seat in enumerate(seats):
-        public = receive_type(seat, "public.view.updated")
+        seat_dm = None if dm_by_seat is None else dm_by_seat.setdefault(seat_index + 1, [])
+        public = receive_type(seat, "public.view.updated", dm_sink=seat_dm)
         latency_ms.append((perf_counter() - started_at) * 1000.0)
         expected_revision = room.core.state.revision
         expected_phase = room.core.state.phase.value
@@ -373,7 +383,7 @@ def receive_broadcasts(
             phase=expected_phase,
         )
         public_count = capture_public_message(public, room.core.state, public_count)
-        seat_view = receive_type(seat, "seat.view.updated")
+        seat_view = receive_type(seat, "seat.view.updated", dm_sink=seat_dm)
         if seat_view["seat_id"] != seat_index + 1:
             raise AssertionError(f"seat {seat_index + 1} received {seat_view!r}")
         if seat_view["server_time"] != server_time:
@@ -386,7 +396,7 @@ def receive_broadcasts(
         if seat_view["outbox_seq"] != public["outbox_seq"]:
             raise AssertionError("seat update and public update outbox_seq diverged")
 
-    host_public = receive_type(host, "public.view.updated")
+    host_public = receive_type(host, "public.view.updated", dm_sink=host_dm)
     if host_public["server_time"] != server_time:
         raise AssertionError("host and seat updates used different server_time samples")
     assert_public_view_matches_state(
@@ -395,7 +405,7 @@ def receive_broadcasts(
         phase=expected_phase,
     )
     public_count = capture_public_message(host_public, room.core.state, public_count)
-    host_control = receive_type(host, "host.control.updated")
+    host_control = receive_type(host, "host.control.updated", dm_sink=host_dm)
     if host_control["server_time"] != server_time:
         raise AssertionError("host control used a different server_time sample")
     assert_public_view_matches_state(
@@ -421,6 +431,8 @@ def submit_accepted(
     *,
     public_count: int,
     latency_ms: list[float],
+    dm_by_seat: dict[int, list[dict[str, Any]]] | None = None,
+    host_dm: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], int]:
     message = command_message(
         room.room_id,
@@ -437,8 +449,14 @@ def submit_accepted(
         started_at=started_at,
         public_count=public_count,
         latency_ms=latency_ms,
+        dm_by_seat=dm_by_seat,
+        host_dm=host_dm,
     )
-    ack = receive_type(sender, "command.ack")
+    sender_dm = None
+    if dm_by_seat is not None:
+        sender_seat_id = next(index + 1 for index, seat in enumerate(seats) if seat is sender)
+        sender_dm = dm_by_seat.setdefault(sender_seat_id, [])
+    ack = receive_type(sender, "command.ack", dm_sink=sender_dm)
     if ack.get("accepted") is not True:
         raise AssertionError(f"expected accepted command, got {ack!r}")
     return ack, public_count
@@ -823,6 +841,8 @@ def test_six_client_end_to_end_service_flow() -> None:
                 raise AssertionError("host resume did not shift the timer deadline")
 
             started_at = perf_counter()
+            dm_by_seat: dict[int, list[dict[str, Any]]] = {}
+            host_dm: list[dict[str, Any]] = []
             enqueue_timer_tick(loop, room, deadline_at=shifted_deadline)
             public_count = receive_broadcasts(
                 seats,
@@ -831,9 +851,40 @@ def test_six_client_end_to_end_service_flow() -> None:
                 started_at=started_at,
                 public_count=public_count,
                 latency_ms=latency_ms,
+                dm_by_seat=dm_by_seat,
+                host_dm=host_dm,
             )
             if room.core.state.phase is not Phase.NIGHT_WOLF:
                 raise AssertionError("explicit timer tick did not enter night wolf")
+            wolf_ids = {
+                player.seat_id
+                for player in room.core.state.players
+                if player.alive and player.role is Role.WEREWOLF
+            }
+            if {seat_id for seat_id, messages in dm_by_seat.items() if messages} != wolf_ids:
+                raise AssertionError(f"production seat prompt audience mismatch: {dm_by_seat!r}")
+            if host_dm:
+                raise AssertionError(f"host received production seat prompts: {host_dm!r}")
+            for seat_id, messages in dm_by_seat.items():
+                if len(messages) != (1 if seat_id in wolf_ids else 0):
+                    raise AssertionError(
+                        f"seat {seat_id} production prompt count mismatch: {messages!r}"
+                    )
+                for message in messages:
+                    payload = cast(dict[str, object], message["message"])
+                    bindings = cast(list[dict[str, object]], payload["audience_bindings"])
+                    binding = bindings[0] if len(bindings) == 1 else {}
+                    if (
+                        payload["channel"] != "seat"
+                        or payload["source"] != "template"
+                        or set(binding) != {"seat_id", "session_id"}
+                        or binding["seat_id"] != seat_id
+                        or not isinstance(binding["session_id"], str)
+                        or not binding["session_id"]
+                    ):
+                        raise AssertionError(
+                            f"seat {seat_id} received invalid production prompt: {message!r}"
+                        )
 
             revision_before_reconnect = room.core.state.revision
             hash_before_reconnect = state_hash(room.core.state)

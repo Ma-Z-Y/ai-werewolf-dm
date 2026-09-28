@@ -525,6 +525,15 @@ class RoomActor:
             raise ValueError("ANNOUNCEMENT_ROOM_MISMATCH")
 
         now_ms = self.monotonic_now_ms()
+        slot_item = self._outbox_item(slot.domain_seq)
+        if (
+            slot_item is not None
+            and slot_item.audience_seat_id is not None
+            and self.seat_session_ids.get(slot_item.audience_seat_id) is None
+        ):
+            self._complete_silently(slot.domain_seq)
+            return self._suppressed_result(slot.domain_seq)
+
         candidate = self._announcement_candidates.get(slot.domain_seq)
         if intent is not None:
             candidate = (
@@ -660,11 +669,22 @@ class RoomActor:
         event = self._event_for_domain_seq(domain_seq)
         if event is None:
             raise ValueError("ANNOUNCEMENT_EVENT_NOT_FOUND")
-        intent = select_template_intent(
-            self.core.state,
-            event,
-            catalog_version=_DM_CATALOG_VERSION,
-        )
+        if item.audience_seat_id is None:
+            intent = select_template_intent(
+                self.core.state,
+                event,
+                catalog_version=_DM_CATALOG_VERSION,
+            )
+        else:
+            session_id = self.seat_session_ids.get(item.audience_seat_id)
+            intent = select_template_intent(
+                self.core.state,
+                event,
+                catalog_version=_DM_CATALOG_VERSION,
+                seat_id=item.audience_seat_id,
+                session_id=session_id,
+                expected_session_id=session_id,
+            )
         facts = project_template_facts(self.core.state, event, intent)
         candidate = (item.kind, intent, facts)
         self._announcement_candidates[domain_seq] = candidate
@@ -702,6 +722,17 @@ class RoomActor:
         if isinstance(payload, PhaseChangedPayload):
             event_state = event_state.model_copy(update={"phase": payload.next_phase})
         try:
+            item = self._outbox_item(domain_seq)
+            if item is not None and item.audience_seat_id is not None:
+                session_id = self.seat_session_ids.get(item.audience_seat_id)
+                return select_template_intent(
+                    event_state,
+                    event,
+                    catalog_version=_DM_CATALOG_VERSION,
+                    seat_id=item.audience_seat_id,
+                    session_id=session_id,
+                    expected_session_id=session_id,
+                )
             return select_template_intent(
                 event_state,
                 event,
@@ -709,6 +740,13 @@ class RoomActor:
             )
         except ValueError:
             return None
+
+    def _complete_silently(self, domain_seq: int) -> None:
+        self._completed_domain_seqs.add(domain_seq)
+        self.processed_announcement_seq = max(
+            self.processed_announcement_seq,
+            domain_seq,
+        )
 
     def _event_for_domain_seq(self, domain_seq: int) -> DomainEvent | None:
         item = self._outbox_item(domain_seq)

@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from tests.conftest import _core_exile_last_wolf, _core_with_wolf_win
+from tests.factories import core_at_wolf, envelope_for, seat_actor
 from werewolf_dm.application.core import GameCore
 from werewolf_dm.application.dm_contracts import (
     DMAnnouncementSlot,
@@ -14,6 +15,7 @@ from werewolf_dm.application.dm_contracts import (
     TemplateIntent,
 )
 from werewolf_dm.application.rooms import DMTemplateMessageUpdate, RoomActor
+from werewolf_dm.domain.contracts import WolfNominateKillCommand
 from werewolf_dm.domain.enums import Phase
 
 CATALOG_VERSION = "s4-template-v1"
@@ -104,6 +106,160 @@ def _slot(actor: RoomActor, domain_seq: int) -> DMAnnouncementSlot:
     )
 
 
+def _current_public_dm_seq(actor: RoomActor) -> int:
+    return next(
+        item.seq
+        for item in reversed(actor.core.state.outbox)
+        if item.kind == "dm.message"
+        and item.audience_seat_id is None
+        and item.revision == actor.core.state.revision
+    )
+
+
+def _game_end_seq(actor: RoomActor) -> int:
+    return next(item.seq for item in reversed(actor.core.state.outbox) if item.kind == "game.ended")
+
+
+@pytest.mark.asyncio
+async def test_production_seat_prompt_is_admitted_for_current_session() -> None:
+    scenario = core_at_wolf()
+    actor = _actor(scenario.core)
+    await actor.start()
+    target_seat_id = scenario.wolf_ids[0]
+    subscriber = RecordingSubscriber(
+        actor_type="seat",
+        seat_id=target_seat_id,
+        channels=frozenset({"public", "seat"}),
+    )
+    await actor.attach_subscriber(subscriber)
+
+    await actor.consume_announcements()
+
+    delivered = [message for message in subscriber.messages if message.type == "dm.message"]
+    assert len(delivered) == 1
+    assert delivered[0].message.channel == "seat"
+    assert delivered[0].message.source == "template"
+    assert delivered[0].message.audience_bindings[0].seat_id == target_seat_id
+
+    await actor.stop()
+
+
+@pytest.mark.asyncio
+async def test_production_seat_prompt_never_reaches_public_or_other_seat() -> None:
+    scenario = core_at_wolf()
+    actor = _actor(scenario.core)
+    await actor.start()
+    target_seat_id = scenario.wolf_ids[0]
+    target = RecordingSubscriber(
+        actor_type="seat",
+        seat_id=target_seat_id,
+        channels=frozenset({"public", "seat"}),
+    )
+    host = RecordingSubscriber(
+        actor_type="host",
+        seat_id=None,
+        channels=frozenset({"public", "host.control"}),
+    )
+    stranger = RecordingSubscriber(
+        actor_type="seat",
+        seat_id=scenario.good_ids[0],
+        channels=frozenset({"public", "seat"}),
+    )
+    await actor.attach_subscriber(target)
+    await actor.attach_subscriber(host)
+    await actor.attach_subscriber(stranger)
+
+    await actor.consume_announcements()
+
+    assert any(
+        message.type == "dm.message" and message.message.channel == "seat"
+        for message in target.messages
+    )
+    assert not any(message.type == "dm.message" for message in host.messages)
+    assert not any(message.type == "dm.message" for message in stranger.messages)
+
+    await actor.stop()
+
+
+@pytest.mark.asyncio
+async def test_offline_seat_prompt_is_completed_without_blocking_later_slots() -> None:
+    scenario = core_at_wolf()
+    actor = _actor(scenario.core)
+    offline_seq = max(item.seq for item in scenario.core.state.outbox)
+
+    await actor.consume_announcements()
+
+    assert actor.published_messages == []
+    assert actor.dm_trace == []
+    assert actor.processed_announcement_seq == offline_seq
+    assert {item.seq for item in scenario.core.state.outbox} == actor._completed_domain_seqs
+
+    await actor.start()
+    seer = RecordingSubscriber(
+        actor_type="seat",
+        seat_id=scenario.seer_id,
+        channels=frozenset({"public", "seat"}),
+    )
+    await actor.attach_subscriber(seer)
+    target = scenario.good_ids[0]
+    for wolf_id in scenario.wolf_ids:
+        result = scenario.core.submit(
+            envelope_for(
+                scenario.core,
+                wolf_id,
+                WolfNominateKillCommand(target_seat_id=target),
+            ),
+            seat_actor(wolf_id),
+        )
+        assert result.accepted is True
+    assert scenario.core.state.phase is Phase.NIGHT_SEER
+
+    await actor.consume_announcements()
+
+    assert any(
+        message.type == "dm.message" and message.message.channel == "seat"
+        for message in seer.messages
+    )
+
+    await actor.stop()
+
+
+@pytest.mark.asyncio
+async def test_reconnected_seat_uses_new_session_binding() -> None:
+    scenario = core_at_wolf()
+    actor = _actor(scenario.core)
+    await actor.start()
+    target_seat_id = scenario.wolf_ids[0]
+    first = RecordingSubscriber(
+        actor_type="seat",
+        seat_id=target_seat_id,
+        channels=frozenset({"public", "seat"}),
+    )
+    await actor.attach_subscriber(first)
+    old_session_id = actor.seat_session_id(target_seat_id)
+    assert old_session_id is not None
+    await actor.detach_subscriber(first.subscription_id)
+
+    second = RecordingSubscriber(
+        actor_type="seat",
+        seat_id=target_seat_id,
+        channels=frozenset({"public", "seat"}),
+    )
+    await actor.attach_subscriber(second)
+    new_session_id = actor.seat_session_id(target_seat_id)
+    assert new_session_id is not None and new_session_id != old_session_id
+
+    await actor.consume_announcements()
+
+    assert not any(message.type == "dm.message" for message in first.messages)
+    delivered = [message for message in second.messages if message.type == "dm.message"]
+    assert len(delivered) == 1
+    assert delivered[0].message.channel == "seat"
+    assert delivered[0].message.audience_bindings[0].session_id == new_session_id
+
+    await actor.stop()
+
+
 @pytest.mark.asyncio
 async def test_dm_delivery_uses_the_single_wire_outbox_sequence() -> None:
     actor = _actor(_core_with_wolf_win(poison_good=False))
@@ -111,7 +267,7 @@ async def test_dm_delivery_uses_the_single_wire_outbox_sequence() -> None:
     subscriber = RecordingSubscriber(
         actor_type="seat",
         seat_id=2,
-        channels=frozenset({"public", "seat"}),
+        channels=frozenset({"public"}),
     )
     host = RecordingSubscriber(
         actor_type="host",
@@ -121,7 +277,7 @@ async def test_dm_delivery_uses_the_single_wire_outbox_sequence() -> None:
     await actor.attach_subscriber(subscriber)
     await actor.attach_subscriber(host)
 
-    result = await actor.consume_slot(domain_seq=3)
+    result = await actor.consume_slot(domain_seq=_current_public_dm_seq(actor))
 
     delivered = [message for message in subscriber.messages if message.type == "dm.message"]
     assert result.admitted is True
@@ -140,14 +296,16 @@ async def test_dm_delivery_uses_the_single_wire_outbox_sequence() -> None:
 @pytest.mark.asyncio
 async def test_mapping_uses_actual_wire_sequence_across_view_updates() -> None:
     actor = _actor(_core_with_wolf_win(poison_good=False))
+    public_seq = _current_public_dm_seq(actor)
+    game_end_seq = _game_end_seq(actor)
 
-    first = await actor.consume_slot(domain_seq=3)
+    first = await actor.consume_slot(domain_seq=public_seq)
     actor._publish_updates()
-    second = await actor.consume_slot(domain_seq=4)
+    second = await actor.consume_slot(domain_seq=game_end_seq)
 
     assert first.transport_seq == 1
     assert second.transport_seq == 3
-    assert actor.domain_to_transport == {3: 1, 4: 3}
+    assert actor.domain_to_transport == {public_seq: 1, game_end_seq: 3}
     assert list(actor.domain_to_transport.values()) == [1, 3]
     assert actor.client_outbox_seq == actor.outbox_seq == 3
 
@@ -159,19 +317,20 @@ async def test_transport_failure_records_suppressed_trace_without_rollback() -> 
     subscriber = RecordingSubscriber(
         actor_type="seat",
         seat_id=2,
-        channels=frozenset({"public", "seat"}),
+        channels=frozenset({"public"}),
         accept_dm=False,
     )
     await actor.attach_subscriber(subscriber)
 
-    result = await actor.consume_slot(domain_seq=3)
+    current_public_seq = _current_public_dm_seq(actor)
+    result = await actor.consume_slot(domain_seq=current_public_seq)
 
     assert result.admitted is True
-    assert actor.domain_to_transport[3] == result.transport_seq
+    assert actor.domain_to_transport[current_public_seq] == result.transport_seq
     assert len(actor.published_messages) == 1
     assert actor.dm_transport_trace[-1].admission_status == "suppressed"
     assert actor.dm_transport_trace[-1].suppress_reason == "transport_failed"
-    next_result = await actor.consume_slot(domain_seq=4)
+    next_result = await actor.consume_slot(domain_seq=_game_end_seq(actor))
     assert next_result.admitted is True
     assert len(actor.published_messages) == 2
 
@@ -202,16 +361,17 @@ async def test_seat_message_is_not_delivered_to_a_different_seat_or_public_subsc
     await actor.attach_subscriber(stranger)
     session_id = actor.seat_session_id(2)
     assert session_id is not None
+    domain_seq = _current_public_dm_seq(actor)
     intent, facts = _seat_intent_and_facts(
         actor,
-        domain_seq=4,
+        domain_seq=domain_seq,
         seat_id=2,
         session_id=session_id,
     )
     actor.core._state = actor.core.state.model_copy(update={"phase": Phase.NIGHT_WOLF})
 
     result = await actor.admit(
-        _slot(actor, 4),
+        _slot(actor, domain_seq),
         intent=intent,
         facts=facts,
     )
@@ -246,15 +406,16 @@ async def test_seat_message_rejects_a_stale_same_seat_subscription() -> None:
     session_id = actor.seat_session_id(2)
     assert session_id is not None
     actor.subscribers[first.subscription_id] = first
+    domain_seq = _current_public_dm_seq(actor)
     intent, facts = _seat_intent_and_facts(
         actor,
-        domain_seq=4,
+        domain_seq=domain_seq,
         seat_id=2,
         session_id=session_id,
     )
     actor.core._state = actor.core.state.model_copy(update={"phase": Phase.NIGHT_WOLF})
 
-    result = await actor.admit(_slot(actor, 4), intent=intent, facts=facts)
+    result = await actor.admit(_slot(actor, domain_seq), intent=intent, facts=facts)
 
     assert result.admitted is True
     assert not any(message.type == "dm.message" for message in first.messages)
@@ -276,7 +437,7 @@ async def test_public_dm_is_delivered_to_a_display_subscriber() -> None:
     display.session_id = actor.display_session_id
     await actor.attach_subscriber(display)
 
-    result = await actor.consume_slot(domain_seq=3)
+    result = await actor.consume_slot(domain_seq=_current_public_dm_seq(actor))
 
     assert result.admitted is True
     assert any(message.type == "dm.message" for message in display.messages)
