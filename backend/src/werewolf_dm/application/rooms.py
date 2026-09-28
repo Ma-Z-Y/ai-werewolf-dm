@@ -534,10 +534,15 @@ class RoomActor:
             self._complete_silently(slot.domain_seq)
             return self._suppressed_result(slot.domain_seq)
 
+        if intent is not None and slot_item is not None:
+            intent_seat_id = intent.audience_seat_ids[0] if intent.channel == "seat" else None
+            if intent_seat_id != slot_item.audience_seat_id:
+                raise ValueError("ANNOUNCEMENT_AUDIENCE_MISMATCH")
+
         candidate = self._announcement_candidates.get(slot.domain_seq)
         if intent is not None:
             candidate = (
-                self._kind_for_domain_seq(slot.domain_seq),
+                slot_item.kind if slot_item is not None else "dm.message",
                 intent,
                 [] if facts is None else list(facts),
             )
@@ -762,12 +767,6 @@ class RoomActor:
             (item for item in self.core.state.outbox if item.seq == domain_seq),
             None,
         )
-
-    def _kind_for_domain_seq(self, domain_seq: int) -> str:
-        item = self._outbox_item(domain_seq)
-        if item is None:
-            raise KeyError(domain_seq)
-        return item.kind
 
     def _audience_matches_current_binding(
         self,

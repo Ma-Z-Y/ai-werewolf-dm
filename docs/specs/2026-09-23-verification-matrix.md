@@ -1,10 +1,10 @@
 ---
 spec_id: verification-matrix
-version: 1.5.3
+version: 1.5.4
 status: frozen
 proposed_at: 2026-09-27
-frozen_at: 2026-09-27
-supersedes: verification-matrix@1.5.2
+frozen_at: 2026-09-28
+supersedes: verification-matrix@1.5.3
 owner: quality
 depends_on:
   - product-constitution@1.1.0
@@ -13,7 +13,7 @@ depends_on:
   - s3-frontend-constitution@1.1.0
 ---
 
-# AI 狼人杀 DM 验证矩阵 v1.5.3
+# AI 狼人杀 DM 验证矩阵 v1.5.4
 
 ## 1. 测试原则
 
@@ -348,7 +348,7 @@ Codex 环境下使用项目脚本和交付前检查等价实现，不依赖 Clau
 
 ## 14. S4 AI DM Template-Only Verification
 
-本节是 `v1.5.3` 冻结的 template-only 验证增量。状态只允许：
+本节是 `v1.5.4` 冻结的 template-only 验证增量。状态只允许：
 
 - `completed`：证据已固定，不表示门禁通过；
 - `template-only`：当前 S4 必须实现和验收；
@@ -379,6 +379,7 @@ Codex 环境下使用项目脚本和交付前检查等价实现，不依赖 Clau
 | `S4-OUT-001` | template-only | RoomActor 按领域 seq 升序 admission；`game.ended` 不得越过更早 `dm.message` |
 | `S4-OUT-002` | template-only | 领域 announcement seq 映射到唯一 wire `RoomActor.outbox_seq`；client 序列不得另建计数器，映射值严格递增且不回归 |
 | `S4-OUT-003` | template-only | 已接纳 `dm.message` 由匹配 public/seat subscriber 投递；offer 失败记录 `transport_failed` trace，但不回滚 admission、mapping 或 game state |
+| `S4-SEAT-001` | template-only | 无当前 session 的 seat slot 静默标记 domain seq 完成并推进 processed seq；不发布、不建立 mapping、不新增 trace、不重试、不阻塞后续 slot，且不计入模板终态指标 |
 | `S4-MET-001` | template-only | 模板终态互斥、domain/transport mapping 守恒；记录 max lag/ratio；无 provider 指标 |
 | `S4-ACC-001` | template-only | 四路使用明确检查清单；覆盖 provider 域名请求为 0、固定 seed 两次 `dmMessages` deep equal |
 
@@ -425,6 +426,7 @@ Deferred rows 不得计入当前 S4 完成率，也不得用 P0-01a/b 结果替�
 | `S4-REC-001`、`REC-011/012` | `S4-04`、`S4-06` | stale/reconnect/recovery 测试 |
 | `S4-OUT-001..002` | `S4-04` | 双序列和终局顺序测试 |
 | `S4-OUT-003` | `S4-04A` | transport delivery、sequence alignment 和 failure-trace 测试 |
+| `S4-SEAT-001` | `S4-07` | offline slot completion、no-transport/no-trace 和 later-slot progress 回归 |
 | `S4-MET-001` | `S4-05` | 模板终态守恒测试 |
 | `S4-ACC-001` | `S4-06` | 四路独立审核工件 |
 
@@ -444,6 +446,14 @@ Deferred rows 不得计入当前 S4 完成率，也不得用 P0-01a/b 结果替�
 降低门禁属于产品决策，不能由实现者自行修改。
 
 ## 15. Changelog
+
+### v1.5.4 - 2026-09-28
+
+- 增加 `S4-SEAT-001`：明确 offline seat slot 的 silent ineligible
+  completion 语义，并锁定不发布、不建立 mapping、不新增 trace、不重试、
+  不阻塞后续 slot。
+- 增加显式 seat intent 与 `OutboxItem.audience_seat_id` 不一致时
+  `ANNOUNCEMENT_AUDIENCE_MISMATCH` fail closed 的验证边界。
 
 ### v1.5.3 - 2026-09-27
 

@@ -273,6 +273,7 @@ export async function playNight(
           (await confirm.isEnabled({ timeout: 1_000 }))
         ) {
           await confirm.click({ force: true, timeout: 1_000 });
+          // ponytail: fixed wait serializes two wolf ACKs; replace with an ACK/control-state wait when exposed.
           await wolfPage.waitForTimeout(500);
         }
       }

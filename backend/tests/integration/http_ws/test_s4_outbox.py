@@ -43,10 +43,11 @@ class RecordingSubscriber:
         self.seat_id = seat_id
         self.session_id = None
         self.channels = channels
+        self.messages: list[object] = []
         self.close_codes: list[int] = []
 
     def offer(self, message: object) -> bool:
-        del message
+        self.messages.append(message)
         return True
 
     def request_close(self, code: int) -> None:
@@ -379,60 +380,39 @@ async def test_room_closed_is_suppressed() -> None:
 
 @pytest.mark.asyncio
 async def test_seat_session_rebinding_invalidates_old_audience() -> None:
-    actor = _actor(_core_exile_last_wolf(), now=datetime(2026, 9, 27, tzinfo=UTC))
+    scenario = core_at_wolf()
+    actor = _actor(scenario.core)
     await actor.start()
+    item = next(item for item in scenario.core.state.outbox if item.audience_seat_id is not None)
+    assert item.audience_seat_id is not None
+    target_seat_id = item.audience_seat_id
     first = RecordingSubscriber(
         actor_type="seat",
-        seat_id=2,
+        seat_id=target_seat_id,
         channels=frozenset({"public", "seat"}),
     )
     await actor.attach_subscriber(first)
-    old_session = actor.seat_session_id(2)
+    old_session = actor.seat_session_id(target_seat_id)
     assert old_session is not None
     await actor.publish_current(first)
-    assert actor.seat_session_id(2) == old_session
-
-    public_seq = _current_public_dm_seq(actor)
-    intent, facts = _seat_intent_and_facts(
-        actor,
-        domain_seq=public_seq,
-        seat_id=2,
-        session_id=old_session,
-    )
-    actor.core._state = actor.core.state.model_copy(update={"phase": Phase.NIGHT_WOLF})
-    first_result = await actor.admit(
-        _slot(actor, domain_seq=public_seq),
-        intent=intent,
-        facts=facts,
-    )
-    assert first_result.admitted is True
-    assert len(actor.published_messages) == 1
-    assert actor.published_messages[0].channel == "seat"
+    assert actor.seat_session_id(target_seat_id) == old_session
 
     await actor.detach_subscriber(first.subscription_id)
     second = RecordingSubscriber(
         actor_type="seat",
-        seat_id=2,
+        seat_id=target_seat_id,
         channels=frozenset({"public", "seat"}),
     )
     await actor.attach_subscriber(second)
-    new_session = actor.seat_session_id(2)
+    new_session = actor.seat_session_id(target_seat_id)
     assert new_session is not None and new_session != old_session
 
-    game_end_seq = _game_end_seq(actor)
-    stale_intent, stale_facts = _seat_intent_and_facts(
-        actor,
-        domain_seq=game_end_seq,
-        seat_id=2,
-        session_id=old_session,
-    )
-    stale_result = await actor.admit(
-        _slot(actor, domain_seq=game_end_seq),
-        intent=stale_intent,
-        facts=stale_facts,
-    )
-    assert stale_result.admitted is False
-    assert len(actor.published_messages) == 1
+    await actor.consume_announcements()
+
+    assert not any(message.type == "dm.message" for message in first.messages)
+    delivered = [message for message in second.messages if message.type == "dm.message"]
+    assert len(delivered) == 1
+    assert delivered[0].message.audience_bindings[0].session_id == new_session
 
     await actor.stop()
 

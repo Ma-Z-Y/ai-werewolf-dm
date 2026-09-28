@@ -5,7 +5,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from tests.conftest import _core_exile_last_wolf, _core_with_wolf_win
+from tests.conftest import _core_with_wolf_win
 from tests.factories import core_at_wolf, envelope_for, seat_actor
 from werewolf_dm.application.core import GameCore
 from werewolf_dm.application.dm_contracts import (
@@ -182,6 +182,39 @@ async def test_production_seat_prompt_never_reaches_public_or_other_seat() -> No
 
 
 @pytest.mark.asyncio
+async def test_explicit_seat_intent_must_match_outbox_audience() -> None:
+    scenario = core_at_wolf()
+    actor = _actor(scenario.core)
+    await actor.start()
+    item = next(item for item in scenario.core.state.outbox if item.audience_seat_id is not None)
+    assert item.audience_seat_id is not None
+    other_seat_id = next(seat_id for seat_id in range(1, 7) if seat_id != item.audience_seat_id)
+    for seat_id in (item.audience_seat_id, other_seat_id):
+        await actor.attach_subscriber(
+            RecordingSubscriber(
+                actor_type="seat",
+                seat_id=seat_id,
+                channels=frozenset({"public", "seat"}),
+            )
+        )
+    session_id = actor.seat_session_id(other_seat_id)
+    assert session_id is not None
+    intent, facts = _seat_intent_and_facts(
+        actor,
+        domain_seq=item.seq,
+        seat_id=other_seat_id,
+        session_id=session_id,
+    )
+
+    with pytest.raises(ValueError, match="ANNOUNCEMENT_AUDIENCE_MISMATCH"):
+        await actor.admit(_slot(actor, item.seq), intent=intent, facts=facts)
+
+    assert actor.published_messages == []
+    assert actor.domain_to_transport == {}
+    await actor.stop()
+
+
+@pytest.mark.asyncio
 async def test_offline_seat_prompt_is_completed_without_blocking_later_slots() -> None:
     scenario = core_at_wolf()
     actor = _actor(scenario.core)
@@ -339,11 +372,16 @@ async def test_transport_failure_records_suppressed_trace_without_rollback() -> 
 
 @pytest.mark.asyncio
 async def test_seat_message_is_not_delivered_to_a_different_seat_or_public_subscriber() -> None:
-    actor = _actor(_core_exile_last_wolf())
+    scenario = core_at_wolf()
+    actor = _actor(scenario.core)
     await actor.start()
+    item = next(item for item in scenario.core.state.outbox if item.audience_seat_id is not None)
+    assert item.audience_seat_id is not None
+    target_seat_id = item.audience_seat_id
+    other_seat_id = next(seat_id for seat_id in range(1, 7) if seat_id != target_seat_id)
     seat_two = RecordingSubscriber(
         actor_type="seat",
-        seat_id=2,
+        seat_id=target_seat_id,
         channels=frozenset({"public", "seat"}),
     )
     host = RecordingSubscriber(
@@ -353,25 +391,23 @@ async def test_seat_message_is_not_delivered_to_a_different_seat_or_public_subsc
     )
     stranger = RecordingSubscriber(
         actor_type="seat",
-        seat_id=3,
+        seat_id=other_seat_id,
         channels=frozenset({"public", "seat"}),
     )
     await actor.attach_subscriber(seat_two)
     await actor.attach_subscriber(host)
     await actor.attach_subscriber(stranger)
-    session_id = actor.seat_session_id(2)
+    session_id = actor.seat_session_id(target_seat_id)
     assert session_id is not None
-    domain_seq = _current_public_dm_seq(actor)
     intent, facts = _seat_intent_and_facts(
         actor,
-        domain_seq=domain_seq,
-        seat_id=2,
+        domain_seq=item.seq,
+        seat_id=target_seat_id,
         session_id=session_id,
     )
-    actor.core._state = actor.core.state.model_copy(update={"phase": Phase.NIGHT_WOLF})
 
     result = await actor.admit(
-        _slot(actor, domain_seq),
+        _slot(actor, item.seq),
         intent=intent,
         facts=facts,
     )
@@ -389,33 +425,35 @@ async def test_seat_message_is_not_delivered_to_a_different_seat_or_public_subsc
 
 @pytest.mark.asyncio
 async def test_seat_message_rejects_a_stale_same_seat_subscription() -> None:
-    actor = _actor(_core_exile_last_wolf())
+    scenario = core_at_wolf()
+    actor = _actor(scenario.core)
     await actor.start()
+    item = next(item for item in scenario.core.state.outbox if item.audience_seat_id is not None)
+    assert item.audience_seat_id is not None
+    target_seat_id = item.audience_seat_id
     first = RecordingSubscriber(
         actor_type="seat",
-        seat_id=2,
+        seat_id=target_seat_id,
         channels=frozenset({"public", "seat"}),
     )
     await actor.attach_subscriber(first)
     second = RecordingSubscriber(
         actor_type="seat",
-        seat_id=2,
+        seat_id=target_seat_id,
         channels=frozenset({"public", "seat"}),
     )
     await actor.attach_subscriber(second)
-    session_id = actor.seat_session_id(2)
+    session_id = actor.seat_session_id(target_seat_id)
     assert session_id is not None
     actor.subscribers[first.subscription_id] = first
-    domain_seq = _current_public_dm_seq(actor)
     intent, facts = _seat_intent_and_facts(
         actor,
-        domain_seq=domain_seq,
-        seat_id=2,
+        domain_seq=item.seq,
+        seat_id=target_seat_id,
         session_id=session_id,
     )
-    actor.core._state = actor.core.state.model_copy(update={"phase": Phase.NIGHT_WOLF})
 
-    result = await actor.admit(_slot(actor, domain_seq), intent=intent, facts=facts)
+    result = await actor.admit(_slot(actor, item.seq), intent=intent, facts=facts)
 
     assert result.admitted is True
     assert not any(message.type == "dm.message" for message in first.messages)
