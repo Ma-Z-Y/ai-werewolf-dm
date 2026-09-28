@@ -29,15 +29,15 @@ v1.5.6 / v1.1.6 进一步要求显式 intent 严格重校验，非法 channel �
 
 ## P1 Proposed
 
-- [主持人纠错与最小持久化设计草案 v0.1.0](2026-09-28-host-recovery-persistence-design.md)
-  - 状态：`proposed`
+- [主持人纠错与最小持久化设计 v1.0.0](2026-09-28-host-recovery-persistence-design.md)
+  - 状态：`frozen`
   - 将冻结规格中的 `HOST_PATCH`、快照回退、强制模板、SQLite 快照、
     事件日志和 token digest 恢复整理成上线前 P1 范围。
   - 对应逐任务 TDD 计划：
     `docs/superpowers/plans/2026-09-28-host-recovery-persistence.md`。
-  - 复核状态：`blocked`；已关闭两轮架构问题，但 rewind epoch/domain seq、
-    普通命令事务回滚和 `SnapshotReason` 触发契约仍需下一轮确认。
-  - 本轮不授权代码实现；评审第 12 节五项决策并关闭阻塞后再执行计划。
+  - 用户已于 2026-09-28 批准 P1 实现契约；implementation plan 的第三轮
+    fresh-context 复核为 `BLOCK`，阻塞项登记为 `projectmem #0243`；
+    关闭并复核 `PASS` 前不得执行。
 
 ## S4 Current
 

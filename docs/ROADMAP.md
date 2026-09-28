@@ -31,10 +31,9 @@
 ## 下一步
 
 - [ ] P1 上线前补强：评审
-  `docs/specs/2026-09-28-host-recovery-persistence-design.md`，确认主持人
-  纠错、快照回退和最小 SQLite 持久化边界；TDD implementation plan 草案
-  已建立但架构复核为 `BLOCK`，待关闭 rewind epoch/domain seq、普通命令
-  事务回滚和 `SnapshotReason` 触发契约后执行。
+  `docs/specs/2026-09-28-host-recovery-persistence-design.md` 已冻结；
+  TDD implementation plan 第三轮 fresh-context 复核为 `BLOCK`
+  （`projectmem #0243`），关闭阻塞并复核 `PASS` 后进入实现。
 - [ ] 后续版本化设计 provider/LLM 重入。
 
 每项任务只有在实现、确定性测试、独立复核和用户验收都完成后才会标记为

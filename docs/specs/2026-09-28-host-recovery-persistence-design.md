@@ -1,17 +1,18 @@
 ---
 spec_id: host-recovery-persistence-design
-version: 0.1.0
-status: proposed
+version: 1.0.0
+status: frozen
 owner: product
 created_at: 2026-09-28
+frozen_at: 2026-09-28
 supersedes: null
 ---
 
 # 主持人纠错与最小持久化设计草案
 
-**评审状态：** `proposed / implementation-plan-blocked`。独立 architect 已
-完成两轮只读复验；在 rewind epoch/domain seq、普通命令事务回滚和
-SnapshotReason 触发契约确认前，计划不得执行。
+**评审状态：** `frozen / implementation-plan-blocked`。用户已于 2026-09-28
+批准 P1 安全默认值；但第三轮 fresh-context 复核仍以 `BLOCK` 结束，并登记
+`projectmem #0243`。实现计划在关闭该 issue 前不得执行。
 
 ## 1. 目标
 
@@ -201,6 +202,7 @@ room_runtime
   outbox_seq
   next_domain_seq
   recovery_epoch
+  discarded_command_keys_json
   runtime_json
 
 room_snapshots
@@ -246,7 +248,7 @@ Schema 只存 token digest，不存 token 原文。密码、API key、真实个�
 1. 写入新 `rooms.state_json`、revision 和 event digest。
 2. 按 `event_ordinal` 追加 `room_events`；普通命令、超时、公告消费和
    视图发布也必须走同一持久化协调边界。
-3. 写入命令去重结果、模板 trace 和 `RoomActor` runtime 摘要。
+3. 写入命令去重结果、两类模板 trace 和 `RoomActor` runtime 摘要。
 4. 写入必要快照。
 5. 写入 host recovery audit（如果适用）。
 6. 清理或更新相关 token / display pairing。
@@ -320,10 +322,9 @@ create_app lifespan
 - 数据库损坏或单局恢复失败不阻塞其他房间。
 - token 原文、隐藏角色、private facts、raw events 不进入公共视图。
 
-## 12. P1 plan 采用的安全默认值
+## 12. P1 已批准的实现契约
 
-implementation plan 采用以下 P1 默认值；这些默认值仍需用户批准后才能冻结
-实现：
+以下实现契约已由用户于 2026-09-28 批准：
 
 1. `HOST_REWIND_TO_SNAPSHOT` 必须精确匹配 `snapshot_id`。P1 只允许
    room 相同且 reason=`PRE_CORRECTION` 的最新快照；不存在、跨房间、
@@ -341,6 +342,18 @@ implementation plan 采用以下 P1 默认值；这些默认值仍需用户批�
    丢弃分支的命令 ID 写入 tombstone，重试时返回新的
    `COMMAND_VOIDED_BY_REWIND`。新的 domain/outbox 序号从
    `next_domain_seq` 全局水位继续。
+6. `next_domain_seq` 是 `RoomActor` 持有的显式单调分配器；`GameCore`
+   生成任何 outbox/domain event 时必须消费该分配器，不能再用
+   `state.outbox[-1].seq + 1` 作为唯一来源。
+7. `TimerTickEvent`、`SubmitCommandEvent`、announcement slot 和 pending
+   admission 都携带 `recovery_epoch`；rewind 后旧 epoch 的异步事件必须
+   丢弃且不能发布。
+8. `command_results` 的 Python 键统一为
+   `CommandDedupeKey(actor_type, actor_key)`；seat actor_key 使用字符串
+   seat id，host actor_key 使用固定 `"host"`，SQLite 对应非空文本。
+9. `SnapshotReason` 固定为 `PAUSED`、`PRE_CORRECTION`、`PHASE_START`、
+   `GAME_END`。普通命令事务在阶段变化和终局时创建快照；暂停和纠错前
+   创建各自快照。
 
 ## 13. 建议实施顺序
 
@@ -351,6 +364,5 @@ implementation plan 采用以下 P1 默认值；这些默认值仍需用户批�
 5. 前端主持人纠错面板。
 6. 重启恢复、跨层隐私和端到端门禁。
 
-本阶段不直接进入代码实现。实现计划已经生成，但独立 architect 复验仍为
-`BLOCK`，不得执行；待第 12 节五项决策确认并关闭剩余阻塞后再进入下一轮
-计划复核。
+本阶段不直接进入代码实现。实现计划已经生成，但第三轮 fresh-context 复核
+仍为 `BLOCK`；只有关闭 `projectmem #0243` 并再次复核 `PASS` 后才能执行。
