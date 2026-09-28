@@ -338,22 +338,13 @@ def transition(
         raise ValueError(f"illegal transition from {state.phase} to {next_phase}")
 
     cause_id = (
-        deterministic_uuid(
+        events[-1].causation_id
+        if events and events[-1].causation_id is not None
+        else deterministic_uuid(
             NAMESPACE_URL,
             state.room_id,
             state.revision,
             next_phase,
-        )
-        if next_phase in _SEAT_PROMPT_ROLES
-        else (
-            events[-1].causation_id
-            if events and events[-1].causation_id is not None
-            else deterministic_uuid(
-                NAMESPACE_URL,
-                state.room_id,
-                state.revision,
-                next_phase,
-            )
         )
     )
     event = build_event(

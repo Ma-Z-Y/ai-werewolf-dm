@@ -273,6 +273,7 @@ export async function playNight(
           (await confirm.isEnabled({ timeout: 1_000 }))
         ) {
           await confirm.click({ force: true, timeout: 1_000 });
+          await wolfPage.waitForTimeout(500);
         }
       }
     },

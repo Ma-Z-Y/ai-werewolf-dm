@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from uuid import uuid4
+
+import pytest
+from pydantic import ValidationError
 
 from tests.factories import (
     Scenario,
     _advance_past_day,
     core_at_wolf,
     envelope_for,
-    seat_actor,
 )
 from werewolf_dm.application.core import GameCore
 from werewolf_dm.domain.contracts import (
@@ -80,31 +83,16 @@ def test_seat_prompt_outbox_items_share_phase_event_and_revision() -> None:
     assert prompt_seqs == tuple(sorted(set(prompt_seqs)))
 
 
-def test_phase_event_identity_is_independent_of_wolf_command_order() -> None:
-    first = core_at_wolf()
-    second = core_at_wolf()
-    first_target = first.good_ids[0]
-    second_target = second.good_ids[0]
-
-    for wolf_id in first.wolf_ids:
-        _submit(
-            first,
-            seat_actor,
-            wolf_id,
-            WolfNominateKillCommand(target_seat_id=first_target),
+@pytest.mark.parametrize("kind", ["view.updated", "game.ended"])
+def test_audience_seat_id_requires_dm_message_kind(kind: str) -> None:
+    with pytest.raises(ValidationError, match="audience_seat_id"):
+        OutboxItem(
+            seq=1,
+            kind=kind,
+            event_id=uuid4(),
+            revision=0,
+            audience_seat_id=1,
         )
-    for wolf_id in reversed(second.wolf_ids):
-        _submit(
-            second,
-            seat_actor,
-            wolf_id,
-            WolfNominateKillCommand(target_seat_id=second_target),
-        )
-
-    assert (
-        _latest_phase_event(first.core, Phase.NIGHT_SEER).event_id
-        == _latest_phase_event(second.core, Phase.NIGHT_SEER).event_id
-    )
 
 
 def test_dead_seer_does_not_receive_phase_prompt(

@@ -36,9 +36,10 @@ S1、S2、S3 历史基线由 v1.3 提供；v1.4 新增 LLM 路径候选规格；
   - 将 D1 至 D8 收窄为 template-only 产品原则、权责边界、信息纪律和
     验收原则。
 
-Template-only implementation plan 已完成；`S4-01` 至 `S4-07` 均已实现、
-通过独立复核并由用户本地验收。当前最终本地门禁为 backend
-`639 passed, 10 skipped`、latency `8 passed, 2 skipped`、
+Template-only implementation plan 已完成；`S4-01` 至 `S4-06` 已实现、
+通过独立复核并由用户本地验收。`S4-07` 已完成生产实现、真实浏览器
+E2E、独立复核和完整交付门禁，用户验收单独记录。当前最终本地门禁为
+backend `640 passed, 10 skipped`、latency `8 passed, 2 skipped`、
 Vitest `166 passed`、Playwright `14 passed`。生产 `SEAT_PROMPT`
 由 `RoomActor` 从领域 outbox 生成，浏览器证据直接来自真实 seat 消息，
 不再使用 E2E-only injection。Next Step 是 provider/LLM 重入的独立

@@ -24,7 +24,8 @@
   template-only service、RoomActor ordered outbox/transport、
   metrics/trace privacy、前端 `dm.message` 隔离与真实模板延迟回归。
 - [x] S4-07 生产 `SEAT_PROMPT`：`RoomActor` 按当前 seat session 从夜阶段
-  outbox 投递座位提示，离线槽不阻塞后续槽，浏览器证据使用真实生产消息。
+  outbox 投递座位提示，离线槽不阻塞后续槽，浏览器证据使用真实生产消息；
+  实现、生产 E2E、独立复核和交付门禁已完成，最终用户验收单独记录。
 
 ## 下一步
 
@@ -32,7 +33,7 @@
 
 每项任务只有在实现、确定性测试、独立复核和用户验收都完成后才会标记为
 完成。正式版本只会在对应阶段的验收出口通过后发布。当前 S4 本地与 CI
-基线为 backend `639 passed, 10 skipped`，latency marker 为
+基线为 backend `640 passed, 10 skipped`，latency marker 为
 `8 passed, 2 skipped`；前端单元/组件测试为 `166 passed`，Playwright
 浏览器测试为 `14 passed`。CI 与根交付门禁同时覆盖后端、前端和隔离的
 latency job。
