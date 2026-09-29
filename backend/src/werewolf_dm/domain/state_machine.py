@@ -2,7 +2,7 @@ import random
 from collections import Counter
 from collections.abc import Sequence
 from datetime import datetime, timedelta
-from typing import Literal
+from typing import Literal, cast
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from pydantic import JsonValue
@@ -18,7 +18,10 @@ from werewolf_dm.domain.contracts import (
     DomainEvent,
     FactionVisibility,
     GameEndedPayload,
+    HostCompensationAudit,
+    HostCorrectionAudit,
     HostForceTemplateCommand,
+    HostPatch,
     HostPatchCommand,
     HostPauseCommand,
     HostPausedPayload,
@@ -40,7 +43,14 @@ from werewolf_dm.domain.contracts import (
     SeatVisibility,
     SeerCheckedPayload,
     SeerInspectCommand,
+    SetAlivePatch,
+    SetPhasePatch,
+    SetPotionPatch,
     SetReadyCommand,
+    SetRolePatch,
+    SetSeerChecksPatch,
+    SetVotePatch,
+    SnapshotReason,
     SpeakCommand,
     SpeechPassedPayload,
     SpeechRecordedPayload,
@@ -78,7 +88,7 @@ from werewolf_dm.domain.model import (
     WolfDecision,
     WolfNomination,
 )
-from werewolf_dm.domain.replay import advance_event_log_digest
+from werewolf_dm.domain.replay import advance_event_log_digest, state_hash
 
 ALLOWED_TRANSITIONS: dict[Phase, frozenset[Phase]] = {
     Phase.LOBBY: frozenset({Phase.ROLE_REVEAL}),
@@ -163,16 +173,35 @@ def _private_fact(
     *,
     fact_ordinal: int = 1,
 ) -> PrivateFact:
+    return _private_fact_from_event_id(
+        event.event_id,
+        recipient_seat_id,
+        fact_type,
+        payload,
+        revision=event.revision,
+        fact_ordinal=fact_ordinal,
+    )
+
+
+def _private_fact_from_event_id(
+    event_id: UUID,
+    recipient_seat_id: int,
+    fact_type: str,
+    payload: dict[str, JsonValue],
+    *,
+    revision: int,
+    fact_ordinal: int = 1,
+) -> PrivateFact:
     return PrivateFact(
         fact_id=deterministic_uuid(
-            event.event_id,
+            event_id,
             recipient_seat_id,
             fact_type,
             fact_ordinal,
         ),
-        event_id=event.event_id,
+        event_id=event_id,
         recipient_seat_id=recipient_seat_id,
-        revision=event.revision,
+        revision=revision,
         fact_type=fact_type,
         payload=payload,
     )
@@ -2321,6 +2350,529 @@ def _apply_role_reveal_timeout(
     return ApplyOutcome(next_state=next_state, events=tuple(events))
 
 
+class _HostPatchRejected(ValueError):
+    def __init__(self, error_code: CommandErrorCode) -> None:
+        super().__init__(error_code.value)
+        self.error_code = error_code
+
+
+def _state_diff(before: GameState, after: GameState) -> dict[str, JsonValue]:
+    excluded = {"event_count", "event_log_digest"}
+    before_payload = before.model_dump(mode="json", exclude=excluded)
+    after_payload = after.model_dump(mode="json", exclude=excluded)
+    return cast(
+        dict[str, JsonValue],
+        {
+            field_name: {
+                "before": before_payload[field_name],
+                "after": after_payload[field_name],
+            }
+            for field_name in sorted(before_payload)
+            if before_payload[field_name] != after_payload[field_name]
+        },
+    )
+
+
+def _host_patch_fact_event_id(command_id: UUID) -> UUID:
+    return deterministic_uuid(
+        NAMESPACE_URL,
+        command_id,
+        2,
+        EventType.HOST_COMPENSATION_APPLIED.value,
+    )
+
+
+def _replace_private_facts(
+    state: GameState,
+    *,
+    removed_types: frozenset[str],
+    additions: tuple[PrivateFact, ...],
+) -> GameState:
+    retained = tuple(fact for fact in state.private_facts if fact.fact_type not in removed_types)
+    known_ids = {fact.fact_id for fact in retained}
+    new_facts = tuple(fact for fact in additions if fact.fact_id not in known_ids)
+    return state.model_copy(update={"private_facts": (*retained, *new_facts)})
+
+
+def _seer_check_facts(
+    state: GameState,
+    event_id: UUID,
+    seer_seat_id: int,
+    checks: tuple[SeerCheckRecord, ...],
+    revision: int,
+) -> tuple[PrivateFact, ...]:
+    return tuple(
+        _private_fact_from_event_id(
+            event_id,
+            seer_seat_id,
+            "SEER_CHECK",
+            {
+                "day": check.day,
+                "target_seat_id": check.target_seat_id,
+                "faction": check.faction.value,
+            },
+            revision=revision,
+            fact_ordinal=ordinal,
+        )
+        for ordinal, check in enumerate(checks, start=1)
+    )
+
+
+def _wolf_decision_facts(
+    state: GameState,
+    event_id: UUID,
+    revision: int,
+) -> tuple[PrivateFact, ...]:
+    payload = _wolf_decision_payload(state.wolf_decision)
+    return tuple(
+        _private_fact_from_event_id(
+            event_id,
+            recipient_seat_id,
+            "WOLF_DECISION",
+            payload,
+            revision=revision,
+            fact_ordinal=ordinal,
+        )
+        for ordinal, recipient_seat_id in enumerate(
+            alive_wolf_ids(state),
+            start=1,
+        )
+    )
+
+
+def _rebuild_phase_start_facts(
+    state: GameState,
+    phase: Phase,
+    event_id: UUID,
+    revision: int,
+) -> GameState:
+    if phase is Phase.NIGHT_WOLF:
+        return _replace_private_facts(
+            state,
+            removed_types=frozenset({"WOLF_DECISION", "WITCH_KILL_TARGET"}),
+            additions=_wolf_decision_facts(state, event_id, revision),
+        )
+    if phase is Phase.NIGHT_WITCH:
+        witch = next(
+            (player for player in state.players if player.alive and player.role is Role.WITCH),
+            None,
+        )
+        additions = (
+            ()
+            if witch is None
+            else (
+                _private_fact_from_event_id(
+                    event_id,
+                    witch.seat_id,
+                    "WITCH_KILL_TARGET",
+                    {"target_seat_id": state.wolf_decision.target_seat_id},
+                    revision=revision,
+                ),
+            )
+        )
+        return _replace_private_facts(
+            state,
+            removed_types=frozenset({"WITCH_KILL_TARGET"}),
+            additions=additions,
+        )
+    if phase is Phase.NIGHT_SEER:
+        return _replace_private_facts(
+            state,
+            removed_types=frozenset({"WITCH_KILL_TARGET"}),
+            additions=(),
+        )
+    return state
+
+
+def _host_patch_players(
+    state: GameState,
+    seat_id: int,
+    *,
+    alive: bool | None = None,
+    role: Role | None = None,
+) -> tuple[Player, ...]:
+    target = _player_at(state, seat_id)
+    if target is None:
+        raise _HostPatchRejected(CommandErrorCode.INVALID_TARGET)
+    update: dict[str, object] = {}
+    if alive is not None:
+        update["alive"] = alive
+    if role is not None:
+        update["role"] = role
+    if not update:
+        raise _HostPatchRejected(CommandErrorCode.INVALID_TARGET)
+    return _players_with(state.players, target.model_copy(update=update))
+
+
+def _host_role_swap_players(
+    state: GameState,
+    seat_id: int,
+    role: Role,
+) -> tuple[Player, ...]:
+    target = _player_at(state, seat_id)
+    if target is None or target.role is None:
+        raise _HostPatchRejected(CommandErrorCode.INVALID_TARGET)
+    if target.role is role:
+        return state.players
+    other = next(
+        (
+            player
+            for player in state.players
+            if player.seat_id != target.seat_id and player.role is role
+        ),
+        None,
+    )
+    if other is None:
+        raise _HostPatchRejected(CommandErrorCode.INVALID_TARGET)
+    return tuple(
+        player.model_copy(
+            update={
+                "role": (
+                    role
+                    if player.seat_id == target.seat_id
+                    else target.role
+                    if player.seat_id == other.seat_id
+                    else player.role
+                )
+            }
+        )
+        for player in state.players
+    )
+
+
+def _phase_start_state(
+    state: GameState,
+    phase: Phase,
+    next_revision: int,
+    now: datetime,
+) -> GameState:
+    if phase is not state.phase:
+        raise _HostPatchRejected(CommandErrorCode.ILLEGAL_PHASE)
+
+    update: dict[str, object] = {
+        "discussion": None,
+        "vote_round": None,
+        "deadline_at": None,
+        "night": NightState(),
+        "wolf_decision": WolfDecision(),
+    }
+    if phase is Phase.ROLE_REVEAL:
+        update["players"] = tuple(
+            player.model_copy(update={"role_confirmed": False}) for player in state.players
+        )
+        update["deadline_at"] = now + timedelta(seconds=ROLE_REVEAL_SECONDS)
+    elif phase is Phase.NIGHT_WOLF:
+        update["deadline_at"] = now + timedelta(seconds=NIGHT_WOLF_SECONDS)
+    elif phase is Phase.NIGHT_SEER:
+        update["wolf_decision"] = state.wolf_decision
+        update["deadline_at"] = now + timedelta(seconds=NIGHT_SEER_SECONDS)
+    elif phase is Phase.NIGHT_WITCH:
+        update["wolf_decision"] = state.wolf_decision
+        update["deadline_at"] = now + timedelta(seconds=NIGHT_WITCH_SECONDS)
+    elif phase is Phase.DAY_DISCUSSION:
+        started = _start_day_discussion(state, now)
+        update["discussion"] = started.discussion
+        update["deadline_at"] = started.deadline_at
+    elif phase is Phase.DAY_VOTE:
+        deadline_at = now + timedelta(seconds=NORMAL_VOTE_SECONDS)
+        update["vote_round"] = VoteRound(
+            round_id=deterministic_uuid(
+                state.room_id,
+                next_revision,
+                Phase.DAY_VOTE,
+                1,
+            ),
+            round_index=1,
+            phase=Phase.DAY_VOTE,
+            eligible_voter_ids=tuple(player.seat_id for player in state.players if player.alive),
+            opened_at=now,
+            deadline_at=deadline_at,
+        )
+        update["deadline_at"] = deadline_at
+    elif phase is Phase.DAY_PK_DISCUSSION:
+        if state.vote_round is None or not state.vote_round.candidate_seat_ids:
+            raise _HostPatchRejected(CommandErrorCode.ILLEGAL_PHASE)
+        deadline_at = now + timedelta(seconds=PK_DISCUSSION_SECONDS)
+        update["vote_round"] = state.vote_round
+        update["discussion"] = DiscussionState(
+            participant_seat_ids=state.vote_round.candidate_seat_ids,
+            current_seat_id=state.vote_round.candidate_seat_ids[0],
+            deadline_at=deadline_at,
+        )
+        update["deadline_at"] = deadline_at
+    elif phase is Phase.DAY_PK_VOTE:
+        if state.vote_round is None or not state.vote_round.candidate_seat_ids:
+            raise _HostPatchRejected(CommandErrorCode.ILLEGAL_PHASE)
+        candidates = state.vote_round.candidate_seat_ids
+        deadline_at = now + timedelta(seconds=PK_VOTE_SECONDS)
+        update["vote_round"] = VoteRound(
+            round_id=deterministic_uuid(
+                state.room_id,
+                next_revision,
+                Phase.DAY_PK_VOTE,
+                2,
+            ),
+            round_index=2,
+            phase=Phase.DAY_PK_VOTE,
+            candidate_seat_ids=candidates,
+            eligible_voter_ids=tuple(
+                player.seat_id
+                for player in state.players
+                if player.alive and player.seat_id not in candidates
+            ),
+            opened_at=now,
+            deadline_at=deadline_at,
+        )
+        update["deadline_at"] = deadline_at
+    return state.model_copy(update=update)
+
+
+def _host_patch_candidate(
+    state: GameState,
+    command_id: UUID,
+    patch: HostPatch,
+    next_revision: int,
+    now: datetime,
+) -> GameState:
+    update: dict[str, object]
+    if isinstance(patch, SetAlivePatch):
+        update = {"players": _host_patch_players(state, patch.seat_id, alive=patch.alive)}
+    elif isinstance(patch, SetRolePatch):
+        update = {"players": _host_role_swap_players(state, patch.seat_id, patch.role)}
+    elif isinstance(patch, SetPotionPatch):
+        update = {
+            "potions": PotionState(
+                antidote_available=patch.antidote_available,
+                poison_available=patch.poison_available,
+            )
+        }
+    elif isinstance(patch, SetVotePatch):
+        round_ = state.vote_round
+        if round_ is None or state.phase not in {Phase.DAY_VOTE, Phase.DAY_PK_VOTE}:
+            raise _HostPatchRejected(CommandErrorCode.ILLEGAL_PHASE)
+        if round_.closed:
+            raise _HostPatchRejected(CommandErrorCode.VOTE_ROUND_CLOSED)
+        if round_.phase is not state.phase or patch.round_id != round_.round_id:
+            raise _HostPatchRejected(CommandErrorCode.ILLEGAL_PHASE)
+        voter = _player_at(state, patch.voter_seat_id)
+        if voter is None or not voter.alive or voter.seat_id not in round_.eligible_voter_ids:
+            raise _HostPatchRejected(CommandErrorCode.ACTOR_NOT_AUTHORIZED)
+        if patch.target_seat_id == voter.seat_id:
+            raise _HostPatchRejected(CommandErrorCode.INVALID_TARGET)
+        if patch.target_seat_id is not None:
+            target = _player_at(state, patch.target_seat_id)
+            if target is None or not target.alive:
+                raise _HostPatchRejected(CommandErrorCode.INVALID_TARGET)
+            if state.phase is Phase.DAY_PK_VOTE and target.seat_id not in round_.candidate_seat_ids:
+                raise _HostPatchRejected(CommandErrorCode.INVALID_TARGET)
+        update = {
+            "vote_round": _replace_vote(
+                round_,
+                patch.voter_seat_id,
+                patch.target_seat_id,
+            )
+        }
+    elif isinstance(patch, SetSeerChecksPatch):
+        seer = _player_at(state, patch.seer_seat_id)
+        if seer is None or seer.role is not Role.SEER:
+            raise _HostPatchRejected(CommandErrorCode.ACTOR_NOT_AUTHORIZED)
+        checks = tuple(patch.checks)
+        keys = tuple((check.day, check.target_seat_id) for check in checks)
+        if keys != tuple(sorted(keys)) or len(set(keys)) != len(keys):
+            raise _HostPatchRejected(CommandErrorCode.INVALID_TARGET)
+        if len({check.day for check in checks}) != len(checks):
+            raise _HostPatchRejected(CommandErrorCode.INVALID_TARGET)
+        for check in checks:
+            if check.day > state.day or check.target_seat_id == seer.seat_id:
+                raise _HostPatchRejected(CommandErrorCode.INVALID_TARGET)
+            target = _player_at(state, check.target_seat_id)
+            if (
+                target is None
+                or target.role is None
+                or faction_of_role(target.role) is not check.faction
+            ):
+                raise _HostPatchRejected(CommandErrorCode.INVALID_TARGET)
+        update = {"seer_checks": checks}
+    elif isinstance(patch, SetPhasePatch):
+        candidate = _phase_start_state(state, patch.phase, next_revision, now)
+        update = {
+            "phase": candidate.phase,
+            "players": candidate.players,
+            "wolf_decision": candidate.wolf_decision,
+            "night": candidate.night,
+            "discussion": candidate.discussion,
+            "vote_round": candidate.vote_round,
+            "deadline_at": candidate.deadline_at,
+        }
+    else:
+        raise _HostPatchRejected(CommandErrorCode.INVALID_TARGET)
+
+    candidate = state.model_copy(update=update)
+    if isinstance(patch, SetAlivePatch):
+        candidate_winner = winner_for(candidate)
+        if candidate_winner is not None and candidate_winner is not winner_for(state):
+            raise _HostPatchRejected(CommandErrorCode.INVALID_TARGET)
+    elif isinstance(patch, SetSeerChecksPatch):
+        candidate = _replace_private_facts(
+            candidate,
+            removed_types=frozenset({"SEER_CHECK"}),
+            additions=_seer_check_facts(
+                candidate,
+                _host_patch_fact_event_id(command_id),
+                patch.seer_seat_id,
+                tuple(patch.checks),
+                next_revision,
+            ),
+        )
+    elif isinstance(patch, SetPhasePatch):
+        candidate = _rebuild_phase_start_facts(
+            candidate,
+            patch.phase,
+            _host_patch_fact_event_id(command_id),
+            next_revision,
+        )
+    validate_invariants(candidate)
+    _validate_host_patch_projections(candidate)
+    return candidate
+
+
+def _validate_host_patch_projections(state: GameState) -> None:
+    from werewolf_dm.domain.visibility import project_public_view, project_seat_view
+
+    project_public_view(state)
+    for seat_id in range(1, 7):
+        project_seat_view(
+            state,
+            seat_id,
+            AuthenticatedActor(
+                actor_type="seat",
+                seat_id=seat_id,
+                room_id=state.room_id,
+            ),
+        )
+
+
+def _apply_host_patch(
+    state: GameState,
+    command_id: UUID,
+    command: HostPatchCommand,
+    actor: AuthenticatedActor | None,
+    now: datetime,
+) -> ApplyOutcome:
+    authorization_error = _authorize_host(state, actor)
+    if authorization_error is not None:
+        return _error(state, authorization_error)
+    if state.phase is Phase.GAME_END:
+        return _error(state, CommandErrorCode.GAME_ENDED)
+    if not state.paused:
+        return _error(state, CommandErrorCode.ILLEGAL_PHASE)
+
+    next_revision = state.revision + 1
+    try:
+        next_state = _host_patch_candidate(
+            state,
+            command_id,
+            command.patch,
+            next_revision,
+            now,
+        )
+        next_state = next_state.model_copy(update={"revision": next_revision})
+        validate_invariants(next_state)
+        _validate_host_patch_projections(next_state)
+    except _HostPatchRejected as exc:
+        return _error(state, exc.error_code)
+    except ValueError:
+        return _error(state, CommandErrorCode.INVALID_TARGET)
+
+    patch_type = command.patch.patch_type
+    correction = build_event(
+        cause_id=command_id,
+        event_ordinal=1,
+        room_id=state.room_id,
+        revision=next_revision,
+        event_type=EventType.HOST_CORRECTION_APPLIED,
+        visibility=HostVisibility(),
+        payload=HostCorrectionAudit(
+            audit_kind="HOST_CORRECTION_APPLIED",
+            status="APPLIED",
+            command_id=command_id,
+            patch_type=patch_type,
+            before_revision=state.revision,
+            after_revision=next_revision,
+            diff=_state_diff(state, next_state),
+            reason="host recovery patch",
+        ),
+        created_at=now,
+    )
+    compensation = build_event(
+        cause_id=command_id,
+        event_ordinal=2,
+        room_id=state.room_id,
+        revision=next_revision,
+        event_type=EventType.HOST_COMPENSATION_APPLIED,
+        visibility=HostVisibility(),
+        payload=HostCompensationAudit(
+            command_id=command_id,
+            patch_type=patch_type,
+            before_revision=state.revision,
+            after_revision=next_revision,
+            post_state_digest=state_hash(next_state),
+            snapshot_id=deterministic_uuid(
+                NAMESPACE_URL,
+                command_id,
+                SnapshotReason.PRE_CORRECTION.value,
+            ),
+        ),
+        created_at=now,
+    )
+    return ApplyOutcome(next_state=next_state, events=(correction, compensation))
+
+
+def _finalize_apply_outcome(state: GameState, outcome: ApplyOutcome) -> ApplyOutcome:
+    next_event_count = state.event_count + len(outcome.events)
+    next_event_log_digest = advance_event_log_digest(
+        state.event_log_digest,
+        outcome.events,
+    )
+    if (
+        outcome.next_state.event_count == next_event_count
+        and outcome.next_state.event_log_digest == next_event_log_digest
+    ):
+        return outcome
+    next_state = outcome.next_state.model_copy(
+        update={
+            "event_count": next_event_count,
+            "event_log_digest": next_event_log_digest,
+        }
+    )
+    next_state = _append_public_timeline(next_state, outcome.events)
+    return ApplyOutcome(
+        next_state=next_state,
+        events=outcome.events,
+        error_code=outcome.error_code,
+    )
+
+
+def apply_host_patch(
+    state: GameState,
+    command: HostPatchCommand,
+    actor: AuthenticatedActor,
+    now: datetime,
+) -> ApplyOutcome:
+    state = GameState.revalidate(state)
+    command = HostPatchCommand.revalidate(command)
+    actor = AuthenticatedActor.revalidate(actor)
+    command_id = deterministic_uuid(
+        NAMESPACE_URL,
+        state.room_id,
+        state.revision,
+        command.patch.patch_type,
+        "HOST_PATCH",
+    )
+    outcome = _apply_host_patch(state, command_id, command, actor, now)
+    return _finalize_apply_outcome(state, outcome)
+
+
 def _apply_command_impl(
     state: GameState,
     trigger: CommandEnvelope | SystemTimeout,
@@ -2348,13 +2900,14 @@ def _apply_command_impl(
         return _error(state, CommandErrorCode.ILLEGAL_PHASE)
 
     payload = trigger.payload
+    if isinstance(payload, HostPatchCommand):
+        return _apply_host_patch(state, trigger.command_id, payload, actor, now)
     if state.phase is Phase.GAME_END:
         return _error(state, CommandErrorCode.GAME_ENDED)
 
     if isinstance(
         payload,
         (
-            HostPatchCommand,
             HostRewindToSnapshotCommand,
             HostForceTemplateCommand,
         ),
@@ -2426,25 +2979,4 @@ def apply_command(
     if actor is not None:
         actor = AuthenticatedActor.revalidate(actor)
     outcome = _apply_command_impl(state, trigger, actor, now)
-    next_event_count = state.event_count + len(outcome.events)
-    next_event_log_digest = advance_event_log_digest(
-        state.event_log_digest,
-        outcome.events,
-    )
-    if (
-        outcome.next_state.event_count == next_event_count
-        and outcome.next_state.event_log_digest == next_event_log_digest
-    ):
-        return outcome
-    next_state = outcome.next_state.model_copy(
-        update={
-            "event_count": next_event_count,
-            "event_log_digest": next_event_log_digest,
-        }
-    )
-    next_state = _append_public_timeline(next_state, outcome.events)
-    return ApplyOutcome(
-        next_state=next_state,
-        events=outcome.events,
-        error_code=outcome.error_code,
-    )
+    return _finalize_apply_outcome(state, outcome)

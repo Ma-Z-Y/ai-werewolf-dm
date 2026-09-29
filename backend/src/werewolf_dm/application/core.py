@@ -363,7 +363,7 @@ class GameCore:
                 error_code=outcome.error_code,
             ),
             dedupe_key=dedupe_key,
-            cache_result=True,
+            cache_result=outcome.error_code is not CommandErrorCode.ACTOR_NOT_AUTHORIZED,
             seq_reservations=reservations,
         )
 
@@ -491,29 +491,19 @@ class GameCore:
         )
 
     def tick(self) -> tuple[CommandResult, ...]:
-        results: list[CommandResult] = []
-        while (
+        if not (
             not self._state.paused
             and self._state.deadline_at is not None
             and self.clock() >= self._state.deadline_at
         ):
-            timeout = SystemTimeout(
-                timeout_id=deterministic_uuid(
-                    NAMESPACE_URL,
-                    self._state.room_id,
-                    self._state.revision,
-                    self._state.phase,
-                ),
-                room_id=self._state.room_id,
-                expected_revision=self._state.revision,
-                phase=self._state.phase,
-                occurred_at=self._state.deadline_at,
-            )
-            result = self.apply_timeout(timeout, self._state.deadline_at)
-            results.append(result)
-            if not result.accepted:
-                break
-        return tuple(results)
+            return ()
+
+        allocator = DomainSeqAllocator(self._next_domain_seq(self._state))
+        mutation = self.stage_tick(next_domain_seq=allocator)
+        for reservation in mutation.seq_reservations:
+            allocator.commit(reservation)
+        self.commit(mutation)
+        return (mutation.command_result,)
 
     @staticmethod
     def _dedupe_key(
