@@ -91,7 +91,7 @@ def create_app(
     latency: LatencyRecorder | None = None,
     reaper_interval_seconds: float = 60.0,
 ) -> FastAPI:
-    app = FastAPI(title="Werewolf DM", version="0.3.0", lifespan=lifespan)
+    app = FastAPI(title="Werewolf DM", version="0.4.0", lifespan=lifespan)
     latency = latency or LatencyRecorder(window=100)
     app.state.room_registry = registry
     app.state.token_ttl = token_ttl

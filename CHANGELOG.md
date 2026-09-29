@@ -3,7 +3,7 @@
 本项目从首个公开提交开始记录重要变更。格式参考 Keep a Changelog，
 版本遵循 Semantic Versioning。
 
-## Unreleased
+## 0.4.0 - 2026-09-29
 
 ### Added
 
