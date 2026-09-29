@@ -25,11 +25,11 @@ import {
 } from "../../session/storage";
 
 import { HostControlScreen } from "./HostControlScreen";
+import type { HostRecoveryPayload } from "./HostRecoveryPanel";
 
-type HostCommandPayload = Extract<
-  CommandPayload,
-  { command_type: "HOST_PAUSE" | "HOST_RESUME" }
->;
+type HostCommandPayload =
+  | Extract<CommandPayload, { command_type: "HOST_PAUSE" | "HOST_RESUME" }>
+  | HostRecoveryPayload;
 
 interface HostCommandIntent {
   commandId: string;
@@ -82,6 +82,15 @@ function errorMessage(error: unknown): string {
   return error instanceof AppError ? error.message : "操作失败，请重试";
 }
 
+function commandErrorMessage(code: string | null): string {
+  if (code === "COMMAND_VOIDED_BY_REWIND") {
+    return "该操作已因回退失效";
+  }
+  return code === null
+    ? "主持人操作失败，请重试"
+    : toAppError({ code }, 0).message;
+}
+
 export function HostRoute() {
   const { roomCode: routeCode } = useParams();
   const roomCode = normalizeRoomCode(routeCode);
@@ -94,6 +103,7 @@ export function HostRoute() {
   const [error, setError] = useState<string | null>(null);
   const [pausePending, setPausePending] = useState(false);
   const [resumePending, setResumePending] = useState(false);
+  const [recoveryPending, setRecoveryPending] = useState(false);
   const [pairingCode, setPairingCode] = useState<string | null>(null);
   const [pairingExpiresAt, setPairingExpiresAt] = useState<string | null>(
     null,
@@ -120,6 +130,7 @@ export function HostRoute() {
       hostCommandRef.current = null;
       setPausePending(false);
       setResumePending(false);
+      setRecoveryPending(false);
       setPairingCode(null);
       setPairingExpiresAt(null);
       setPairingExpired(false);
@@ -167,6 +178,7 @@ export function HostRoute() {
       hostCommandRef.current = { commandId: id, payload };
       setPausePending(payload.command_type === "HOST_PAUSE");
       setResumePending(payload.command_type === "HOST_RESUME");
+      setRecoveryPending(payload.command_type === "HOST_PATCH");
       setError(null);
       return id;
     },
@@ -192,6 +204,7 @@ export function HostRoute() {
           hostCommandRef.current = null;
           setPausePending(false);
           setResumePending(false);
+          setRecoveryPending(false);
         }
         return;
       }
@@ -232,6 +245,7 @@ export function HostRoute() {
         hostCommandRef.current = null;
         setPausePending(false);
         setResumePending(false);
+        setRecoveryPending(false);
         if (message.accepted) {
           setError(null);
           return;
@@ -245,21 +259,21 @@ export function HostRoute() {
         ) {
           sendHostCommand(
             pending.payload,
-            latestControl.revision,
+            Math.max(message.revision, latestControl.revision),
             session,
           );
           return;
         }
 
-        setError(
-          message.error_code === null
-            ? "主持人操作失败，请重试"
-            : toAppError({ code: message.error_code }, 0).message,
-        );
+        setError(commandErrorMessage(message.error_code));
         return;
       }
 
       if (message.type === "error") {
+        hostCommandRef.current = null;
+        setPausePending(false);
+        setResumePending(false);
+        setRecoveryPending(false);
         if (
           message.code === "TOKEN_INVALID" ||
           message.code === "TOKEN_EXPIRED"
@@ -345,6 +359,20 @@ export function HostRoute() {
       hostControl.revision,
       session,
     );
+    if (id === null) {
+      setError("连接尚未就绪，请重试");
+    }
+  }
+
+  function handleRecoveryPatch(payload: HostRecoveryPayload) {
+    if (
+      session === null ||
+      hostControl === null ||
+      hostCommandRef.current !== null
+    ) {
+      return;
+    }
+    const id = sendHostCommand(payload, hostControl.revision, session);
     if (id === null) {
       setError("连接尚未就绪，请重试");
     }
@@ -485,12 +513,14 @@ export function HostRoute() {
       onDownloadAudit={() => void handleDownloadAudit()}
       onGeneratePairing={() => void handleGeneratePairing()}
       onPause={handlePause}
+      onRecoveryPatch={handleRecoveryPatch}
       onResume={handleResume}
       onRevokeDisplay={() => void handleRevokeDisplay()}
       pairingCode={pairingCode}
       pairingExpired={pairingExpired}
       pairingPending={pairingPending}
       pausePending={pausePending}
+      recoveryPending={recoveryPending}
       resumePending={resumePending}
       revokePending={revokePending}
       roomCode={session.roomCode}

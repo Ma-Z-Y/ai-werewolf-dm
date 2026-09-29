@@ -76,6 +76,7 @@ describe("room REST client", () => {
         state: {},
         raw_events: [],
         dm_trace: [],
+        recovery_audit: [],
         snapshots: [],
       }),
     );
@@ -83,7 +84,7 @@ describe("room REST client", () => {
     await getHostAudit("ABCDEF", "host-token");
 
     expect(fetchMock).toHaveBeenLastCalledWith(
-      "/rooms/ABCDEF/audit",
+      "/rooms/ABCDEF/audit?include=dm_trace,recovery_audit,snapshots",
       expect.objectContaining({
         headers: expect.objectContaining({
           Authorization: "Bearer host-token",

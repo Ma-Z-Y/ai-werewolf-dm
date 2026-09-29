@@ -252,14 +252,17 @@ describe("host control console", () => {
     });
   });
 
-  it("explains that correction is unavailable without fake controls", async () => {
+  it("tells the host to pause before using correction", async () => {
     writeHostSessionForRoom();
     renderHost();
     await openHostSocket();
 
     expect(
-      screen.getByText("主持人纠错尚未实现，请结束并重开一局。"),
+      screen.getByText("请先暂停游戏，再进行主持人纠错"),
     ).toBeVisible();
+    expect(
+      screen.queryByText("主持人纠错尚未实现，请结束并重开一局。"),
+    ).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: /修正|回退/ }),
     ).not.toBeInTheDocument();
@@ -328,6 +331,7 @@ describe("host control console", () => {
         state: { phase: "DAY_DISCUSSION" },
         raw_events: [],
         dm_trace: [],
+        recovery_audit: [],
         snapshots: [],
       }),
     );
@@ -341,7 +345,7 @@ describe("host control console", () => {
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     expect(fetchMock).toHaveBeenCalledWith(
-      "/rooms/ABCDEF/audit",
+      "/rooms/ABCDEF/audit?include=dm_trace,recovery_audit,snapshots",
       expect.objectContaining({
         headers: expect.objectContaining({
           Authorization: "Bearer host-token",
@@ -386,6 +390,7 @@ describe("host control console", () => {
           state: { phase: "DAY_DISCUSSION" },
           raw_events: [],
           dm_trace: [],
+          recovery_audit: [],
           snapshots: [],
         }),
       );
@@ -458,6 +463,32 @@ describe("host control console", () => {
     expect(
       screen.queryByText("internal detail must not render"),
     ).not.toBeInTheDocument();
+  });
+
+  it("clears recovery pending after a server error", async () => {
+    writeHostSessionForRoom();
+    renderHost();
+    const socket = await openHostSocket(hostControl(true, 7));
+    const user = userEvent.setup();
+
+    await user.selectOptions(screen.getByLabelText("修正类型"), "SET_POTION");
+    await user.type(screen.getByLabelText("确认原因"), "药水状态误标");
+    await user.click(screen.getByRole("button", { name: "提交主持人纠错" }));
+    expect(screen.getByRole("button", { name: "正在提交" })).toBeDisabled();
+
+    await act(async () => {
+      socket.message({
+        type: "error",
+        code: "BAD_REQUEST",
+        message: "请求不合法",
+        request_id: "request-2",
+      });
+    });
+
+    expect(screen.getByText("请求不合法")).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "提交主持人纠错" }),
+    ).toBeEnabled();
   });
 
   it("stops the old host console when another device takes over", async () => {

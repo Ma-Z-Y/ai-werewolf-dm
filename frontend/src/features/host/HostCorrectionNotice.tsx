@@ -1,12 +1,21 @@
-export function HostCorrectionNotice() {
+export interface HostCorrectionNoticeProps {
+  paused: boolean;
+  pending: boolean;
+}
+
+export function HostCorrectionNotice({
+  paused,
+  pending,
+}: HostCorrectionNoticeProps) {
+  const message = pending
+    ? "正在提交主持人纠错。"
+    : paused
+      ? null
+      : "请先暂停游戏，再进行主持人纠错";
+  if (message === null) return null;
   return (
-    <section aria-labelledby="correction-disabled" className="grid gap-2">
-      <h2 id="correction-disabled" className="text-lg font-semibold">
-        主持人纠错
-      </h2>
-      <p className="text-sm text-text-muted">
-        主持人纠错尚未实现，请结束并重开一局。
-      </p>
-    </section>
+    <p aria-live="polite" className="text-sm text-text-muted" role="status">
+      {message}
+    </p>
   );
 }

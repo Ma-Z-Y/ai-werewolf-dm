@@ -3,18 +3,26 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import logging
 import secrets
 import string
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from time import monotonic_ns
 from typing import Literal, Protocol, Self
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
-from pydantic import Field, ValidationError, model_validator
+from pydantic import Field, JsonValue, ValidationError, model_validator
 
-from werewolf_dm.application.core import Clock, GameCore
+from werewolf_dm.application.core import (
+    Clock,
+    CoreMutation,
+    DomainSeqAllocator,
+    GameCore,
+    PersistenceCoordinator,
+    validate_reconstruction_runtime,
+)
 from werewolf_dm.application.dm_contracts import (
     DMAdmissionResult,
     DMAnnouncementSlot,
@@ -30,25 +38,46 @@ from werewolf_dm.application.dm_intents import (
 )
 from werewolf_dm.application.dm_service import TemplateDMService, TemplateRenderError
 from werewolf_dm.application.dm_templates import TemplateRegistry
+from werewolf_dm.application.host_recovery import HostRecoveryService, RecoveryCommit
 from werewolf_dm.domain.contracts import (
     EVENT_PAYLOAD_MODELS,
     ActorType,
     AuthenticatedActor,
     CommandEnvelope,
     CommandErrorCode,
+    CommandResult,
     DomainEvent,
+    HostForceTemplateCommand,
+    HostPatchCommand,
+    HostRewindToSnapshotCommand,
     PhaseChangedPayload,
+    SnapshotReason,
 )
-from werewolf_dm.domain.model import OutboxItem, StrictModel
+from werewolf_dm.domain.model import GameState, OutboxItem, StrictModel
 from werewolf_dm.domain.visibility import (
     PublicView,
     SeatView,
     project_public_view,
     project_seat_view,
 )
+from werewolf_dm.infrastructure.persistence import (
+    PersistedAdmission,
+    PersistedDMTrace,
+    PersistedPublication,
+    PersistedRecoveryAudit,
+    PersistedRoom,
+    PersistedRoomRuntime,
+    PersistedSnapshot,
+    PersistedToken,
+    PersistenceError,
+    PersistenceNotFoundError,
+    SQLiteRoomStore,
+)
 
 _DM_CATALOG_VERSION = "s4-template-v1"
+_RULEPACK_VERSION: Literal["1.1.0"] = "1.1.0"
 UuidSource = Callable[[], UUID]
+logger = logging.getLogger(__name__)
 
 
 class TokenSource(Protocol):
@@ -242,6 +271,7 @@ class SubmitCommandEvent:
     envelope: CommandEnvelope
     actor: AuthenticatedActor
     result: asyncio.Future[RoomCommandAck]
+    recovery_epoch: int = 0
 
 
 @dataclass(slots=True)
@@ -249,11 +279,13 @@ class TimerTickEvent:
     revision: int
     deadline_at: datetime
     now: datetime
+    recovery_epoch: int = 0
 
 
 @dataclass(slots=True)
 class SyncDisplaySessionEvent:
     active_session_id: UUID | None
+    recovery_epoch: int = 0
 
 
 @dataclass(slots=True)
@@ -261,16 +293,18 @@ class AttachSubscriberEvent:
     subscriber: RoomSubscriber
     result: asyncio.Future[None]
     initial: bool
+    recovery_epoch: int = 0
 
 
 @dataclass(slots=True)
 class DetachSubscriberEvent:
     subscription_id: UUID
+    recovery_epoch: int = 0
 
 
 @dataclass(slots=True)
 class StopEvent:
-    pass
+    recovery_epoch: int = 0
 
 
 RoomEvent = (
@@ -328,6 +362,21 @@ class TokenService:
         self._seat_records: dict[UUID, dict[int, TokenRecord]] = {}
         self._display_records: dict[UUID, TokenRecord] = {}
 
+    @contextlib.contextmanager
+    def mutation_scope(self) -> Iterator[None]:
+        records = self._records.copy()
+        seat_records = {
+            room_id: room_records.copy() for room_id, room_records in self._seat_records.items()
+        }
+        display_records = self._display_records.copy()
+        try:
+            yield
+        except BaseException:
+            self._records = records
+            self._seat_records = seat_records
+            self._display_records = display_records
+            raise
+
     @staticmethod
     def digest(raw_token: str) -> str:
         return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
@@ -365,6 +414,21 @@ class TokenService:
         self._records[record.token_digest] = record
         self._seat_records.setdefault(room_id, {})[seat_id] = record
         return raw, expires_at
+
+    def restore(self, records: Iterable[TokenRecord]) -> None:
+        self._records.clear()
+        self._seat_records.clear()
+        self._display_records.clear()
+        now = self.clock()
+        for record in records:
+            if record.expires_at <= now:
+                continue
+            self._records[record.token_digest] = record
+            if record.actor_type == "seat":
+                assert record.seat_id is not None
+                self._seat_records.setdefault(record.room_id, {})[record.seat_id] = record
+            elif record.actor_type == "display":
+                self._display_records[record.room_id] = record
 
     def resolve(self, raw_token: str) -> TokenRecord:
         record = self._records.get(self.digest(raw_token))
@@ -439,6 +503,13 @@ class RoomActor:
         dm_service: TemplateDMService | None = None,
         monotonic_ms: Callable[[], int] | None = None,
         uuid_source: UuidSource = uuid4,
+        activity_sink: Callable[[RoomActor], None] | None = None,
+        coordinator: PersistenceCoordinator | None = None,
+        runtime: PersistedRoomRuntime | None = None,
+        dm_traces: tuple[DMTraceRecord, ...] = (),
+        dm_transport_traces: tuple[DMTraceRecord, ...] = (),
+        recovery_audit: tuple[PersistedRecoveryAudit, ...] = (),
+        snapshots: tuple[PersistedSnapshot, ...] = (),
     ) -> None:
         self.room_id = room_id
         self.room_code = room_code
@@ -447,17 +518,53 @@ class RoomActor:
         self.last_activity_at = last_activity_at
         self.core = core or GameCore(room_id=room_id, seed=seed, clock=clock)
         self.dm_service = dm_service or TemplateDMService(registry=TemplateRegistry())
+        self._coordinator = coordinator or PersistenceCoordinator(None)
+        self._recovery_service = (
+            HostRecoveryService(self._coordinator.store)
+            if self._coordinator.store is not None
+            else None
+        )
         self.events: asyncio.Queue[RoomEvent] = asyncio.Queue()
         self.subscribers: dict[UUID, RoomSubscriber] = {}
-        self.outbox_seq = 0
-        self.processed_announcement_seq = 0
-        self.domain_to_transport: dict[int, int] = {}
+        self.outbox_seq = runtime.outbox_seq if runtime is not None else 0
+        self.processed_announcement_seq = (
+            runtime.processed_announcement_seq if runtime is not None else 0
+        )
+        self.domain_to_transport: dict[int, int] = (
+            dict(runtime.domain_to_transport) if runtime is not None else {}
+        )
         self.published_messages: list[DMTemplateMessage] = []
         self.published_kinds: list[str] = []
-        self.dm_trace: list[DMTraceRecord] = []
-        self.dm_transport_trace: list[DMTraceRecord] = []
+        self.dm_trace: list[DMTraceRecord] = list(dm_traces)
+        self.dm_transport_trace: list[DMTraceRecord] = list(dm_transport_traces)
+        self._dm_trace_cutoff = runtime.dm_trace_cutoff if runtime is not None else 0
+        self._dm_transport_trace_cutoff = (
+            runtime.dm_transport_trace_cutoff if runtime is not None else 0
+        )
+        if self._dm_trace_cutoff > len(self.dm_trace) or self._dm_transport_trace_cutoff > len(
+            self.dm_transport_trace
+        ):
+            raise ValueError("DM trace cutoff exceeds persisted trace history")
         self.last_trace: DMTraceRecord | None = None
+        self._recovery_audit = recovery_audit
+        self._snapshots = snapshots
         self.seat_session_ids: dict[int, UUID] = {}
+        self.recovery_epoch = runtime.recovery_epoch if runtime is not None else 0
+        self._discarded_command_tombstones = (
+            tuple(runtime.discarded_command_tombstones) if runtime is not None else ()
+        )
+        self._published_message_ids = set(
+            runtime.published_message_ids if runtime is not None else ()
+        )
+        domain_seq_start = runtime.next_domain_seq if runtime is not None else 0
+        self.domain_seq_allocator = DomainSeqAllocator(
+            max(
+                domain_seq_start,
+                self._next_domain_seq_floor(self.core.state),
+            )
+        )
+        if runtime is not None:
+            validate_reconstruction_runtime(self.core.state, runtime)
         self.closed = False
         self._started = False
         self._task: asyncio.Task[None] | None = None
@@ -466,7 +573,9 @@ class RoomActor:
         self.deadline_changed = asyncio.Event()
         self.display_token_digest: str | None = None
         self.display_session_id: UUID | None = None
-        self._completed_domain_seqs: set[int] = set()
+        self._completed_domain_seqs: set[int] = set(
+            runtime.completed_domain_seqs if runtime is not None else ()
+        )
         self._announcement_candidates: dict[
             int,
             tuple[str, TemplateIntent, list[TemplateFact]],
@@ -476,10 +585,44 @@ class RoomActor:
         self._monotonic_ms_source = monotonic_ms or (lambda: monotonic_ns() // 1_000_000)
         self._fixed_monotonic_ms: int | None = None
         self._uuid_source = uuid_source
+        self._activity_sink = activity_sink
 
     @property
     def client_outbox_seq(self) -> int:
         return self.outbox_seq
+
+    @property
+    def metrics_dm_trace(self) -> tuple[DMTraceRecord, ...]:
+        return tuple(self.dm_trace[self._dm_trace_cutoff :])
+
+    @property
+    def metrics_dm_transport_trace(self) -> tuple[DMTraceRecord, ...]:
+        return tuple(self.dm_transport_trace[self._dm_transport_trace_cutoff :])
+
+    @property
+    def published_message_ids(self) -> tuple[UUID, ...]:
+        return tuple(sorted(self._published_message_ids, key=str))
+
+    def host_recovery_audit(self) -> tuple[dict[str, JsonValue], ...]:
+        return tuple(record.model_dump(mode="json") for record in self._recovery_audit)
+
+    def host_snapshots(self) -> tuple[dict[str, JsonValue], ...]:
+        return tuple(snapshot.model_dump(mode="json") for snapshot in self._snapshots)
+
+    def refresh_host_audit(self) -> None:
+        store = self._coordinator.store
+        if store is None:
+            self._recovery_audit = ()
+            self._snapshots = ()
+            return
+        self._recovery_audit = store.load_recovery_audit(self.room_id)
+        self._snapshots = store.load_snapshots(self.room_id)
+
+    @staticmethod
+    def _next_domain_seq_floor(state: GameState) -> int:
+        if not state.outbox:
+            return 1
+        return state.outbox[-1].seq + 1
 
     def monotonic_now_ms(self) -> int:
         if self._fixed_monotonic_ms is not None:
@@ -611,18 +754,22 @@ class RoomActor:
                 _DM_CATALOG_VERSION,
             )
         except TemplateRenderError:
-            self._completed_domain_seqs.add(slot.domain_seq)
-            self.processed_announcement_seq = max(
-                self.processed_announcement_seq,
-                slot.domain_seq,
-            )
-            self._record_trace(
+            completed = set(self._completed_domain_seqs)
+            completed.add(slot.domain_seq)
+            processed = max(self.processed_announcement_seq, slot.domain_seq)
+            trace = self._build_trace(
                 slot,
                 candidate_intent,
                 admission_status="failed",
                 suppress_reason=None,
                 elapsed_ms=max(0, now_ms - slot.trigger_at_monotonic_ms),
             )
+            runtime = self._runtime_snapshot(
+                completed_domain_seqs=completed,
+                processed_announcement_seq=processed,
+            )
+            self._commit_runtime_update(runtime, (trace,))
+            self._apply_runtime(runtime, traces=(trace,))
             return self._suppressed_result(slot.domain_seq)
 
         if not self._audience_matches_current_binding(rendered.audience_bindings):
@@ -630,13 +777,11 @@ class RoomActor:
             return self._suppressed_result(slot.domain_seq)
 
         transport_seq = self.outbox_seq + 1
-        self.outbox_seq = transport_seq
-        self.domain_to_transport[slot.domain_seq] = transport_seq
-        self._completed_domain_seqs.add(slot.domain_seq)
-        self.processed_announcement_seq = max(
-            self.processed_announcement_seq,
-            slot.domain_seq,
-        )
+        mapping = dict(self.domain_to_transport)
+        mapping[slot.domain_seq] = transport_seq
+        completed = set(self._completed_domain_seqs)
+        completed.add(slot.domain_seq)
+        processed = max(self.processed_announcement_seq, slot.domain_seq)
         message = DMTemplateMessage(
             message_id=uuid5(
                 NAMESPACE_URL,
@@ -649,15 +794,44 @@ class RoomActor:
             text=rendered.final_text,
             source="template",
         )
-        self.published_messages.append(message)
-        self.published_kinds.append(kind)
-        self._record_trace(
+        published_message_ids = set(self._published_message_ids)
+        published_message_ids.add(message.message_id)
+        trace = self._build_trace(
             slot,
             candidate_intent,
             admission_status="admitted",
             suppress_reason=None,
             elapsed_ms=max(0, now_ms - slot.trigger_at_monotonic_ms),
         )
+        runtime = self._runtime_snapshot(
+            outbox_seq=transport_seq,
+            domain_to_transport=mapping,
+            completed_domain_seqs=completed,
+            processed_announcement_seq=processed,
+            published_message_ids=published_message_ids,
+        )
+        self._commit_runtime_update(
+            runtime,
+            (trace,),
+            admissions=(
+                PersistedAdmission(
+                    domain_seq=slot.domain_seq,
+                    message_id=message.message_id,
+                    transport_seq=transport_seq,
+                    recovery_epoch=self.recovery_epoch,
+                ),
+            ),
+            publications=(
+                PersistedPublication(
+                    transport_seq=transport_seq,
+                    message_id=message.message_id,
+                    recovery_epoch=self.recovery_epoch,
+                ),
+            ),
+        )
+        self._apply_runtime(runtime, traces=(trace,))
+        self.published_messages.append(message)
+        self.published_kinds.append(kind)
         self._publish_dm_message(
             message,
             transport_seq=transport_seq,
@@ -755,11 +929,15 @@ class RoomActor:
             return None
 
     def _complete_silently(self, domain_seq: int) -> None:
-        self._completed_domain_seqs.add(domain_seq)
-        self.processed_announcement_seq = max(
-            self.processed_announcement_seq,
-            domain_seq,
+        completed = set(self._completed_domain_seqs)
+        completed.add(domain_seq)
+        processed = max(self.processed_announcement_seq, domain_seq)
+        runtime = self._runtime_snapshot(
+            completed_domain_seqs=completed,
+            processed_announcement_seq=processed,
         )
+        self._commit_runtime_update(runtime)
+        self._apply_runtime(runtime)
 
     def _event_for_domain_seq(self, domain_seq: int) -> DomainEvent | None:
         item = self._outbox_item(domain_seq)
@@ -796,12 +974,22 @@ class RoomActor:
         reason: SuppressReason,
         now_ms: int,
     ) -> None:
-        self._completed_domain_seqs.add(slot.domain_seq)
-        self.processed_announcement_seq = max(
-            self.processed_announcement_seq,
-            slot.domain_seq,
+        completed = set(self._completed_domain_seqs)
+        completed.add(slot.domain_seq)
+        processed = max(self.processed_announcement_seq, slot.domain_seq)
+        trace = self._build_trace(
+            slot,
+            intent,
+            admission_status="suppressed",
+            suppress_reason=reason,
+            elapsed_ms=max(0, now_ms - slot.trigger_at_monotonic_ms),
         )
-        self._record_suppressed(slot, intent, reason, now_ms)
+        runtime = self._runtime_snapshot(
+            completed_domain_seqs=completed,
+            processed_announcement_seq=processed,
+        )
+        self._commit_runtime_update(runtime, (trace,))
+        self._apply_runtime(runtime, traces=(trace,))
 
     def _record_suppressed(
         self,
@@ -810,15 +998,18 @@ class RoomActor:
         reason: SuppressReason,
         now_ms: int,
     ) -> None:
-        self._record_trace(
+        trace = self._build_trace(
             slot,
             intent,
             admission_status="suppressed",
             suppress_reason=reason,
             elapsed_ms=max(0, now_ms - slot.trigger_at_monotonic_ms),
         )
+        runtime = self._runtime_snapshot()
+        self._commit_runtime_update(runtime, (trace,))
+        self._apply_runtime(runtime, traces=(trace,))
 
-    def _record_trace(
+    def _build_trace(
         self,
         slot: DMAnnouncementSlot,
         intent: TemplateIntent,
@@ -826,8 +1017,8 @@ class RoomActor:
         admission_status: Literal["admitted", "suppressed", "failed"],
         suppress_reason: SuppressReason | None,
         elapsed_ms: int,
-    ) -> None:
-        trace = DMTraceRecord(
+    ) -> DMTraceRecord:
+        return DMTraceRecord(
             trace_id=self._uuid_source(),
             intent_id=intent.intent_id,
             template_variant_id=intent.template_variant_id,
@@ -839,8 +1030,6 @@ class RoomActor:
             suppress_reason=suppress_reason,
             elapsed_ms=elapsed_ms,
         )
-        self.dm_trace.append(trace)
-        self.last_trace = trace
 
     def _suppressed_result(self, domain_seq: int) -> DMAdmissionResult:
         return DMAdmissionResult(
@@ -853,11 +1042,176 @@ class RoomActor:
     def current_deadline(self) -> datetime | None:
         return self.core.state.deadline_at
 
-    def sync_display_session(self) -> None:
-        self.events.put_nowait(SyncDisplaySessionEvent(active_session_id=self.display_session_id))
+    def _runtime_snapshot(
+        self,
+        *,
+        outbox_seq: int | None = None,
+        domain_to_transport: dict[int, int] | None = None,
+        completed_domain_seqs: set[int] | None = None,
+        processed_announcement_seq: int | None = None,
+        published_message_ids: set[UUID] | None = None,
+        next_domain_seq: int | None = None,
+        recovery_epoch: int | None = None,
+    ) -> PersistedRoomRuntime:
+        return PersistedRoomRuntime.model_construct(
+            outbox_seq=self.outbox_seq if outbox_seq is None else outbox_seq,
+            domain_to_transport=(
+                dict(self.domain_to_transport)
+                if domain_to_transport is None
+                else domain_to_transport
+            ),
+            completed_domain_seqs=tuple(
+                sorted(
+                    self._completed_domain_seqs
+                    if completed_domain_seqs is None
+                    else completed_domain_seqs
+                )
+            ),
+            processed_announcement_seq=(
+                self.processed_announcement_seq
+                if processed_announcement_seq is None
+                else processed_announcement_seq
+            ),
+            published_message_ids=tuple(
+                sorted(
+                    self._published_message_ids
+                    if published_message_ids is None
+                    else published_message_ids,
+                    key=str,
+                )
+            ),
+            next_domain_seq=(
+                self.domain_seq_allocator.current() if next_domain_seq is None else next_domain_seq
+            ),
+            recovery_epoch=(self.recovery_epoch if recovery_epoch is None else recovery_epoch),
+            discarded_command_tombstones=self._discarded_command_tombstones,
+            dm_trace_cutoff=self._dm_trace_cutoff,
+            dm_transport_trace_cutoff=self._dm_transport_trace_cutoff,
+        )
 
-    def touch(self, *, now: datetime | None = None) -> None:
+    @staticmethod
+    def _persisted_trace(
+        trace: DMTraceRecord,
+        *,
+        transport: bool = False,
+    ) -> PersistedDMTrace:
+        return PersistedDMTrace(
+            trace_kind="DM_TRANSPORT_TRACE" if transport else "DM_TRACE",
+            trace=trace,
+        )
+
+    def _commit_core_mutation(self, mutation: CoreMutation) -> None:
+        must_persist = (
+            mutation.next_state != self.core.state
+            or bool(mutation.appended_events)
+            or mutation.cache_result
+        )
+        if not must_persist:
+            return
+        snapshot = self._snapshot_for_mutation(mutation)
+        try:
+            self._coordinator.commit_core_mutation(
+                self.room_id,
+                mutation,
+                self._runtime_snapshot(),
+                (),
+                snapshot=snapshot,
+            )
+        except BaseException:
+            for reservation in reversed(mutation.seq_reservations):
+                self.domain_seq_allocator.rollback(reservation)
+            raise
+        self.core.commit(mutation)
+        for reservation in mutation.seq_reservations:
+            self.domain_seq_allocator.commit(reservation)
+        if snapshot is not None:
+            self._snapshots = (*self._snapshots, snapshot)
+
+    def _snapshot_for_mutation(
+        self,
+        mutation: CoreMutation,
+    ) -> PersistedSnapshot | None:
+        if self._coordinator.store is None or not mutation.command_result.accepted:
+            return None
+        current = self.core.state
+        next_state = mutation.next_state
+        reason: SnapshotReason | None = None
+        if current.winner is None and next_state.winner is not None:
+            reason = SnapshotReason.GAME_END
+        elif current.phase is not next_state.phase:
+            reason = SnapshotReason.PHASE_START
+        elif not current.paused and next_state.paused:
+            reason = SnapshotReason.PAUSED
+        if reason is None:
+            return None
+        return PersistedSnapshot(
+            snapshot_id=uuid5(
+                NAMESPACE_URL,
+                f"{self.room_id}:{next_state.revision}:{reason.value}",
+            ),
+            room_id=self.room_id,
+            revision=next_state.revision,
+            reason=reason,
+            state=next_state,
+            event_count=next_state.event_count,
+            created_at=self.clock(),
+        )
+
+    def _commit_runtime_update(
+        self,
+        runtime: PersistedRoomRuntime,
+        traces: tuple[DMTraceRecord, ...] = (),
+        *,
+        transport_traces: bool = False,
+        admissions: tuple[PersistedAdmission, ...] = (),
+        publications: tuple[PersistedPublication, ...] = (),
+    ) -> None:
+        persisted_traces = tuple(
+            self._persisted_trace(trace, transport=transport_traces) for trace in traces
+        )
+        self._coordinator.commit_runtime_update(
+            self.room_id,
+            runtime,
+            persisted_traces,
+            admissions,
+            publications,
+        )
+
+    def _apply_runtime(
+        self,
+        runtime: PersistedRoomRuntime,
+        *,
+        traces: tuple[DMTraceRecord, ...] = (),
+    ) -> None:
+        self.outbox_seq = runtime.outbox_seq
+        self.domain_to_transport = dict(runtime.domain_to_transport)
+        self.processed_announcement_seq = runtime.processed_announcement_seq
+        self._completed_domain_seqs = set(runtime.completed_domain_seqs)
+        self._published_message_ids = set(runtime.published_message_ids)
+        self.recovery_epoch = runtime.recovery_epoch
+        self._discarded_command_tombstones = tuple(runtime.discarded_command_tombstones)
+        self._dm_trace_cutoff = runtime.dm_trace_cutoff
+        self._dm_transport_trace_cutoff = runtime.dm_transport_trace_cutoff
+        if self._dm_trace_cutoff > len(self.dm_trace) or self._dm_transport_trace_cutoff > len(
+            self.dm_transport_trace
+        ):
+            raise ValueError("DM trace cutoff exceeds persisted trace history")
+        if traces:
+            self.dm_trace.extend(traces)
+            self.last_trace = traces[-1]
+
+    def sync_display_session(self) -> None:
+        self.events.put_nowait(
+            SyncDisplaySessionEvent(
+                active_session_id=self.display_session_id,
+                recovery_epoch=self.recovery_epoch,
+            )
+        )
+
+    def touch(self, *, now: datetime | None = None, persist: bool = True) -> None:
         self.last_activity_at = self.clock() if now is None else now
+        if persist and self._activity_sink is not None:
+            self._activity_sink(self)
 
     def _reject_pending_futures(self, exc: BaseException) -> None:
         failure = RoomClosedError("ROOM_CLOSED") if isinstance(exc, asyncio.CancelledError) else exc
@@ -880,7 +1234,8 @@ class RoomActor:
             self._timer_task.cancel()
 
     def _on_actor_task_done(self, task: asyncio.Task[None]) -> None:
-        del task
+        if not task.cancelled():
+            task.exception()
         self._close(RoomClosedError("ROOM_CLOSED"))
 
     async def start(self) -> None:
@@ -911,7 +1266,7 @@ class RoomActor:
     async def stop(self) -> None:
         task_was_done = self._task is not None and self._task.done()
         self._close(RoomClosedError("ROOM_CLOSED"))
-        await self.events.put(StopEvent())
+        await self.events.put(StopEvent(recovery_epoch=self.recovery_epoch))
         await self._cancel_timer_task()
         if self._task is not None:
             if task_was_done:
@@ -933,6 +1288,7 @@ class RoomActor:
                 revision=revision,
                 deadline_at=deadline_at,
                 now=now,
+                recovery_epoch=self.recovery_epoch,
             )
         )
 
@@ -952,6 +1308,7 @@ class RoomActor:
                 envelope=envelope,
                 actor=actor,
                 result=future,
+                recovery_epoch=self.recovery_epoch,
             )
         )
         try:
@@ -971,6 +1328,7 @@ class RoomActor:
                 subscriber=subscriber,
                 result=future,
                 initial=True,
+                recovery_epoch=self.recovery_epoch,
             )
         )
         try:
@@ -990,6 +1348,7 @@ class RoomActor:
                 subscriber=subscriber,
                 result=future,
                 initial=False,
+                recovery_epoch=self.recovery_epoch,
             )
         )
         try:
@@ -998,7 +1357,12 @@ class RoomActor:
             self._pending_futures.discard(future)
 
     async def detach_subscriber(self, subscription_id: UUID) -> None:
-        await self.events.put(DetachSubscriberEvent(subscription_id=subscription_id))
+        await self.events.put(
+            DetachSubscriberEvent(
+                subscription_id=subscription_id,
+                recovery_epoch=self.recovery_epoch,
+            )
+        )
 
     async def run(self) -> None:
         try:
@@ -1015,12 +1379,57 @@ class RoomActor:
             event = await self.events.get()
             if isinstance(event, StopEvent):
                 return
+            if (
+                getattr(event, "recovery_epoch", None) is not None
+                and event.recovery_epoch != self.recovery_epoch
+            ):
+                if isinstance(event, SubmitCommandEvent) and not event.result.done():
+                    event.result.set_result(
+                        RoomCommandAck(
+                            command_id=event.envelope.command_id,
+                            accepted=False,
+                            revision=self.core.state.revision,
+                            error_code=CommandErrorCode.COMMAND_VOIDED_BY_REWIND,
+                            outbox_seq=self.outbox_seq,
+                        )
+                    )
+                elif isinstance(event, AttachSubscriberEvent) and not event.result.done():
+                    event.result.set_result(None)
+                continue
             if isinstance(event, SubmitCommandEvent):
                 revision_before = self.core.state.revision
-                result = self.core.submit(event.envelope, event.actor)
+                if isinstance(
+                    event.envelope.payload,
+                    (
+                        HostPatchCommand,
+                        HostRewindToSnapshotCommand,
+                        HostForceTemplateCommand,
+                    ),
+                ):
+                    result = self._submit_recovery_command(
+                        event.envelope,
+                        event.actor,
+                    )
+                else:
+                    mutation = self.core.stage_submit(
+                        event.envelope,
+                        event.actor,
+                        next_domain_seq=self.domain_seq_allocator,
+                        discarded_command_tombstones=self._discarded_command_tombstones,
+                    )
+                    self._commit_core_mutation(mutation)
+                    result = mutation.command_result
                 if result.accepted and result.revision > revision_before:
                     self.touch()
-                    await self.consume_announcements()
+                    if not isinstance(
+                        event.envelope.payload,
+                        (
+                            HostPatchCommand,
+                            HostRewindToSnapshotCommand,
+                            HostForceTemplateCommand,
+                        ),
+                    ):
+                        await self.consume_announcements()
                     self._publish_updates()
                 if not event.result.done():
                     event.result.set_result(
@@ -1040,8 +1449,11 @@ class RoomActor:
                     and event.deadline_at == self.core.state.deadline_at
                     and not self.core.state.paused
                 ):
-                    results = self.core.tick()
-                    if any(result.accepted for result in results):
+                    mutation = self.core.stage_tick(
+                        next_domain_seq=self.domain_seq_allocator,
+                    )
+                    if mutation.command_result.accepted:
+                        self._commit_core_mutation(mutation)
                         self.touch()
                         await self.consume_announcements()
                         self._publish_updates()
@@ -1112,6 +1524,99 @@ class RoomActor:
                 continue
             raise RuntimeError("UNHANDLED_ROOM_EVENT")
 
+    def _submit_recovery_command(
+        self,
+        envelope: CommandEnvelope,
+        actor: AuthenticatedActor,
+    ) -> CommandResult:
+        if envelope.room_id != self.room_id:
+            return CommandResult(
+                command_id=envelope.command_id,
+                accepted=False,
+                revision=self.core.state.revision,
+                event_ids=(),
+                error_code=CommandErrorCode.ACTOR_NOT_AUTHORIZED,
+            )
+        service = self._recovery_service
+        if service is None:
+            return CommandResult(
+                command_id=envelope.command_id,
+                accepted=False,
+                revision=self.core.state.revision,
+                event_ids=(),
+                error_code=CommandErrorCode.HOST_RECOVERY_NOT_IN_S1,
+            )
+        runtime = self._runtime_snapshot()
+        payload = envelope.payload
+        if isinstance(payload, HostPatchCommand):
+            commit = service.stage_patch(
+                room_id=envelope.room_id,
+                core=self.core,
+                runtime=runtime,
+                command=payload,
+                actor=actor,
+                now=self.clock(),
+                command_id=envelope.command_id,
+                expected_revision=envelope.expected_revision,
+            )
+        elif isinstance(payload, HostRewindToSnapshotCommand):
+            commit = service.stage_rewind(
+                core=self.core,
+                runtime=runtime,
+                command=payload,
+                actor=actor,
+                now=self.clock(),
+                command_id=envelope.command_id,
+                expected_revision=envelope.expected_revision,
+            )
+        else:
+            assert isinstance(payload, HostForceTemplateCommand)
+            commit = service.stage_force_template(
+                core=self.core,
+                runtime=runtime,
+                command=payload,
+                actor=actor,
+                now=self.clock(),
+                command_id=envelope.command_id,
+                expected_revision=envelope.expected_revision,
+            )
+        store = self._coordinator.store
+        assert store is not None
+        with store.transaction() as connection:
+            service.persist_commit(connection, self.room_id, commit)
+        self._apply_recovery_commit(commit)
+        return commit.command_result
+
+    def _apply_recovery_commit(self, commit: RecoveryCommit) -> None:
+        store = self._coordinator.store
+        assert store is not None
+        previous_epoch = self.recovery_epoch
+        if commit.events:
+            state, events = store.load_core(self.room_id)
+            self.core = GameCore.restore(
+                room_id=self.room_id,
+                seed=state.seed,
+                clock=self.clock,
+                state=state,
+                events=events,
+                command_results=store.load_command_results(self.room_id),
+            )
+            runtime = store.load_room_runtime(self.room_id)
+            self._apply_runtime(runtime)
+            self.domain_seq_allocator = DomainSeqAllocator(
+                max(
+                    runtime.next_domain_seq,
+                    self._next_domain_seq_floor(self.core.state),
+                )
+            )
+            if runtime.recovery_epoch > previous_epoch:
+                self.published_messages.clear()
+                self.published_kinds.clear()
+                self._announcement_candidates.clear()
+                self._announcement_slots.clear()
+        self._snapshots = store.load_snapshots(self.room_id)
+        self._recovery_audit = store.load_recovery_audit(self.room_id)
+
     @staticmethod
     def _subscriber_identity(
         subscriber: RoomSubscriber,
@@ -1176,23 +1681,30 @@ class RoomActor:
         *,
         elapsed_ms: int,
     ) -> None:
-        self.dm_transport_trace.append(
-            DMTraceRecord(
-                trace_id=self._uuid_source(),
-                intent_id=intent.intent_id,
-                template_variant_id=intent.template_variant_id,
-                catalog_version=intent.catalog_version,
-                source_event_ids=intent.source_event_ids,
-                channel=intent.channel,
-                audience_seat_ids=intent.audience_seat_ids,
-                admission_status="suppressed",
-                suppress_reason="transport_failed",
-                elapsed_ms=elapsed_ms,
-            )
+        trace = DMTraceRecord(
+            trace_id=self._uuid_source(),
+            intent_id=intent.intent_id,
+            template_variant_id=intent.template_variant_id,
+            catalog_version=intent.catalog_version,
+            source_event_ids=intent.source_event_ids,
+            channel=intent.channel,
+            audience_seat_ids=intent.audience_seat_ids,
+            admission_status="suppressed",
+            suppress_reason="transport_failed",
+            elapsed_ms=elapsed_ms,
         )
+        runtime = self._runtime_snapshot()
+        self._commit_runtime_update(
+            runtime,
+            (trace,),
+            transport_traces=True,
+        )
+        self.dm_transport_trace.append(trace)
 
     def _publish_updates(self) -> None:
-        self.outbox_seq += 1
+        runtime = self._runtime_snapshot(outbox_seq=self.outbox_seq + 1)
+        self._commit_runtime_update(runtime)
+        self._apply_runtime(runtime)
         server_time = self.clock()
         for subscription_id, subscriber in tuple(self.subscribers.items()):
             if (
@@ -1301,6 +1813,7 @@ class RoomRegistry:
         max_rooms: int = 256,
         max_connections: int = 1024,
         uuid_source: UuidSource = uuid4,
+        store: SQLiteRoomStore | None = None,
     ) -> None:
         if max_rooms <= 0 or max_connections <= 0:
             raise ValueError("ROOM_LIMIT_INVALID")
@@ -1314,12 +1827,201 @@ class RoomRegistry:
         self._uuid_source = uuid_source
         self.max_rooms = max_rooms
         self.max_connections = max_connections
+        self.store = store
         self.rooms: dict[str, RoomActor] = {}
         self.active_connections = 0
         self.auth_failures = 0
         self.slow_connection_closes = 0
         self._display_pairings: dict[UUID, DisplayPairing] = {}
         self._pairing_attempts: dict[tuple[UUID, str], tuple[datetime, int]] = {}
+        if self.store is not None:
+            self._restore_from_store(self.store)
+
+    def _restore_from_store(self, store: SQLiteRoomStore) -> None:
+        now = self.clock()
+        actors_by_id: dict[UUID, RoomActor] = {}
+        for persisted in store.load_rooms():
+            if persisted.expires_at <= now:
+                store.delete_room(persisted.room_id)
+                continue
+            try:
+                (
+                    core,
+                    runtime,
+                    dm_traces,
+                    dm_transport_traces,
+                    recovery_audit,
+                    snapshots,
+                ) = self._restore_room(store, persisted)
+            except (PersistenceError, ValueError) as exc:
+                logger.warning(
+                    "Skipping corrupt persisted room code=%s exception_type=%s",
+                    persisted.room_code,
+                    type(exc).__name__,
+                )
+                continue
+            actor = self._new_actor(
+                room_id=persisted.room_id,
+                room_code=persisted.room_code,
+                seed=persisted.seed,
+                expires_at=persisted.expires_at,
+                last_activity_at=persisted.last_activity_at,
+                core=core,
+                runtime=runtime,
+                dm_traces=dm_traces,
+                dm_transport_traces=dm_transport_traces,
+                recovery_audit=recovery_audit,
+                snapshots=snapshots,
+            )
+            self.rooms[persisted.room_code] = actor
+            actors_by_id[persisted.room_id] = actor
+
+        records = tuple(
+            self._token_record(token)
+            for token in store.load_tokens()
+            if not token.revoked and token.expires_at > now and token.room_id in actors_by_id
+        )
+        self.tokens.restore(records)
+        for record in records:
+            if record.actor_type != "display":
+                continue
+            actor = actors_by_id[record.room_id]
+            actor.display_token_digest = record.token_digest
+            actor.display_session_id = record.session_id
+
+    def _restore_room(
+        self,
+        store: SQLiteRoomStore,
+        persisted: PersistedRoom,
+    ) -> tuple[
+        GameCore,
+        PersistedRoomRuntime,
+        tuple[DMTraceRecord, ...],
+        tuple[DMTraceRecord, ...],
+        tuple[PersistedRecoveryAudit, ...],
+        tuple[PersistedSnapshot, ...],
+    ]:
+        try:
+            state, events = store.load_core(persisted.room_id)
+            core = GameCore.restore(
+                room_id=persisted.room_id,
+                seed=persisted.seed,
+                clock=self.clock,
+                state=state,
+                events=events,
+                command_results=store.load_command_results(persisted.room_id),
+            )
+        except PersistenceNotFoundError:
+            core = GameCore.new_room(
+                persisted.room_id,
+                persisted.seed,
+                self.clock,
+            )
+        try:
+            runtime = store.load_room_runtime(persisted.room_id)
+        except PersistenceNotFoundError:
+            next_domain_seq = core.state.outbox[-1].seq + 1 if core.state.outbox else 1
+            runtime = PersistedRoomRuntime(
+                outbox_seq=0,
+                domain_to_transport={},
+                completed_domain_seqs=(),
+                processed_announcement_seq=0,
+                published_message_ids=(),
+                next_domain_seq=next_domain_seq,
+                recovery_epoch=0,
+                discarded_command_tombstones=(),
+            )
+        dm_traces = store.load_dm_traces(
+            persisted.room_id,
+            "DM_TRACE",
+        )
+        dm_transport_traces = store.load_dm_traces(
+            persisted.room_id,
+            "DM_TRANSPORT_TRACE",
+        )
+        recovery_audit = store.load_recovery_audit(persisted.room_id)
+        snapshots = store.load_snapshots(persisted.room_id)
+        return core, runtime, dm_traces, dm_transport_traces, recovery_audit, snapshots
+
+    def _new_actor(
+        self,
+        *,
+        room_id: UUID,
+        room_code: str,
+        seed: int,
+        expires_at: datetime,
+        last_activity_at: datetime,
+        core: GameCore | None = None,
+        runtime: PersistedRoomRuntime | None = None,
+        dm_traces: tuple[DMTraceRecord, ...] = (),
+        dm_transport_traces: tuple[DMTraceRecord, ...] = (),
+        recovery_audit: tuple[PersistedRecoveryAudit, ...] = (),
+        snapshots: tuple[PersistedSnapshot, ...] = (),
+    ) -> RoomActor:
+        return RoomActor(
+            room_id=room_id,
+            room_code=room_code,
+            seed=seed,
+            clock=self.clock,
+            expires_at=expires_at,
+            last_activity_at=last_activity_at,
+            core=core,
+            coordinator=PersistenceCoordinator(self.store),
+            runtime=runtime,
+            dm_traces=dm_traces,
+            dm_transport_traces=dm_transport_traces,
+            recovery_audit=recovery_audit,
+            snapshots=snapshots,
+            uuid_source=self._uuid_source,
+            activity_sink=(self._persist_room_activity if self.store is not None else None),
+        )
+
+    @staticmethod
+    def _token_record(token: PersistedToken) -> TokenRecord:
+        return TokenRecord(
+            token_digest=token.token_digest,
+            room_id=token.room_id,
+            actor_type=token.actor_type,
+            seat_id=token.seat_id,
+            session_id=token.session_id,
+            issued_at=token.issued_at,
+            expires_at=token.expires_at,
+        )
+
+    @staticmethod
+    def _persisted_room(actor: RoomActor) -> PersistedRoom:
+        return PersistedRoom(
+            room_code=actor.room_code,
+            room_id=actor.room_id,
+            seed=actor.core.state.seed,
+            rulepack_version=_RULEPACK_VERSION,
+            expires_at=actor.expires_at,
+            last_activity_at=actor.last_activity_at,
+        )
+
+    @staticmethod
+    def _persisted_token(record: TokenRecord, *, revoked: bool = False) -> PersistedToken:
+        return PersistedToken(
+            token_digest=record.token_digest,
+            room_id=record.room_id,
+            actor_type=record.actor_type,
+            seat_id=record.seat_id,
+            session_id=record.session_id,
+            issued_at=record.issued_at,
+            expires_at=record.expires_at,
+            revoked=revoked,
+        )
+
+    def _persist_room_activity(self, actor: RoomActor) -> None:
+        if self.store is not None:
+            self.store.save_room(self._persisted_room(actor))
+
+    def _persist_room_and_token(self, actor: RoomActor, record: TokenRecord) -> None:
+        if self.store is None:
+            return
+        with self.store.transaction():
+            self.store.save_room(self._persisted_room(actor))
+            self.store.save_token(self._persisted_token(record))
 
     def active_connection_count(self) -> int:
         return self.active_connections
@@ -1409,16 +2111,16 @@ class RoomRegistry:
                 break
         else:
             raise RuntimeError("ROOM_CODE_EXHAUSTED")
-        token, expires_at = self.tokens.issue_host(room_id, ttl)
-        actor = RoomActor(
-            room_id=room_id,
-            room_code=room_code,
-            seed=self.seed_source(),
-            clock=self.clock,
-            expires_at=expires_at,
-            last_activity_at=self.clock(),
-            uuid_source=self._uuid_source,
-        )
+        with self.tokens.mutation_scope():
+            token, expires_at = self.tokens.issue_host(room_id, ttl)
+            actor = self._new_actor(
+                room_id=room_id,
+                room_code=room_code,
+                seed=self.seed_source(),
+                expires_at=expires_at,
+                last_activity_at=self.clock(),
+            )
+            self._persist_room_and_token(actor, self.tokens.resolve(token))
         self.rooms[room_code] = actor
         return CreatedRoom(
             room_id=room_id,
@@ -1436,12 +2138,19 @@ class RoomRegistry:
         )
         if seat_id is None:
             raise ValueError("ROOM_FULL")
-        actor.touch()
-        token, expires_at = self.tokens.issue_seat(
-            actor.room_id,
-            seat_id,
-            timedelta(hours=4),
-        )
+        previous_activity = actor.last_activity_at
+        try:
+            with self.tokens.mutation_scope():
+                actor.touch(persist=False)
+                token, expires_at = self.tokens.issue_seat(
+                    actor.room_id,
+                    seat_id,
+                    timedelta(hours=4),
+                )
+                self._persist_room_and_token(actor, self.tokens.resolve(token))
+        except BaseException:
+            actor.last_activity_at = previous_activity
+            raise
         return JoinedRoom(
             room_id=actor.room_id,
             room_code=room_code,
@@ -1497,41 +2206,87 @@ class RoomRegistry:
             if pairing.failed_attempts >= 5:
                 self._display_pairings.pop(room.room_id, None)
             raise ValueError("TOKEN_INVALID")
+        previous_display = self.tokens.display_record(room.room_id)
+        previous_digest = room.display_token_digest
+        previous_session = room.display_session_id
+        try:
+            with self.tokens.mutation_scope():
+                raw, expires_at = self.tokens.issue_display(
+                    room.room_id,
+                    timedelta(hours=1),
+                    room_expires_at=room.expires_at,
+                )
+                record = self.tokens.display_record(room.room_id)
+                assert record is not None and record.session_id is not None
+                room.display_session_id = record.session_id
+                room.display_token_digest = self.tokens.digest(raw)
+                if self.store is not None:
+                    with self.store.transaction():
+                        if previous_display is not None:
+                            self.store.save_token(
+                                self._persisted_token(previous_display, revoked=True)
+                            )
+                        self.store.save_token(self._persisted_token(record))
+                        self.store.save_room(self._persisted_room(room))
+        except BaseException:
+            room.display_token_digest = previous_digest
+            room.display_session_id = previous_session
+            raise
         self._display_pairings.pop(room.room_id, None)
-        raw, expires_at = self.tokens.issue_display(
-            room.room_id,
-            timedelta(hours=1),
-            room_expires_at=room.expires_at,
-        )
-        record = self.tokens.display_record(room.room_id)
-        assert record is not None and record.session_id is not None
-        room.display_session_id = record.session_id
-        room.display_token_digest = self.tokens.digest(raw)
         room.sync_display_session()
         return room.room_id, raw, expires_at
 
     def revoke_display(self, room_code: str) -> None:
         room = self.get_by_code(room_code)
-        self.tokens.revoke_display(room.room_id)
-        room.display_token_digest = None
-        room.display_session_id = None
+        record = self.tokens.display_record(room.room_id)
+        previous_digest = room.display_token_digest
+        previous_session = room.display_session_id
+        try:
+            with self.tokens.mutation_scope():
+                self.tokens.revoke_display(room.room_id)
+                room.display_token_digest = None
+                room.display_session_id = None
+                if self.store is not None and record is not None:
+                    with self.store.transaction():
+                        self.store.save_token(self._persisted_token(record, revoked=True))
+                        self.store.save_room(self._persisted_room(room))
+        except BaseException:
+            room.display_token_digest = previous_digest
+            room.display_session_id = previous_session
+            raise
         room.sync_display_session()
 
     async def start_room(self, room_code: str) -> None:
         actor = self.get_by_code(room_code)
         await actor.start()
 
+    async def start_rooms(self) -> None:
+        for actor in tuple(self.rooms.values()):
+            await actor.start()
+
     async def remove_room(self, room_code: str) -> None:
-        actor = self.rooms.pop(room_code, None)
-        if actor is not None:
-            try:
+        actor = self.rooms.get(room_code)
+        if actor is None:
+            return
+        if self.store is not None:
+            self.store.delete_room(actor.room_id)
+        self.rooms.pop(room_code, None)
+        try:
+            await actor.stop()
+        finally:
+            self._display_pairings.pop(actor.room_id, None)
+            for key in tuple(self._pairing_attempts):
+                if key[0] == actor.room_id:
+                    del self._pairing_attempts[key]
+            self.tokens.remove_room(actor.room_id)
+
+    async def close(self, *, close_store: bool = False) -> None:
+        try:
+            for actor in tuple(self.rooms.values()):
                 await actor.stop()
-            finally:
-                self._display_pairings.pop(actor.room_id, None)
-                for key in tuple(self._pairing_attempts):
-                    if key[0] == actor.room_id:
-                        del self._pairing_attempts[key]
-                self.tokens.remove_room(actor.room_id)
+        finally:
+            if close_store and self.store is not None:
+                self.store.close()
 
     async def reap_expired(self) -> int:
         now = self.clock()

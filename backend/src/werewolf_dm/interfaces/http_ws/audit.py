@@ -1,5 +1,6 @@
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Query, Request
 
+from werewolf_dm.application.dm_metrics import clip_dm_trace
 from werewolf_dm.domain.visibility import (
     HostAuditExport,
     PlayerReplay,
@@ -18,6 +19,25 @@ async def replay(room_code: str, request: Request) -> PlayerReplay:
 
 
 @router.get("/{room_code}/audit", response_model=HostAuditExport)
-async def audit(room_code: str, request: Request) -> HostAuditExport:
+async def audit(
+    room_code: str,
+    request: Request,
+    include: str = Query(
+        default="",
+        description="Comma-separated audit sections; supports dm_trace.",
+    ),
+) -> HostAuditExport:
     actor, authenticated, _ = authorize_bearer(request, room_code, "host")
-    return project_host_audit(actor.core.state, actor.core.events, authenticated)
+    requested = frozenset(value.strip() for value in include.split(",") if value.strip())
+    return project_host_audit(
+        actor.core.state,
+        actor.core.events,
+        authenticated,
+        dm_trace=(
+            clip_dm_trace(actor.dm_trace, actor.dm_transport_trace)
+            if "dm_trace" in requested
+            else ()
+        ),
+        recovery_audit=actor.host_recovery_audit() if "recovery_audit" in requested else (),
+        snapshots=actor.host_snapshots() if "snapshots" in requested else (),
+    )

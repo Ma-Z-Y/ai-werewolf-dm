@@ -25,6 +25,19 @@ v1.5.6 / v1.1.6 进一步要求显式 intent 严格重校验，非法 channel �
 7. [S3 前端与协议预检设计 v1.1](2026-09-25-s3-frontend-design.md)
 8. [S4 AI DM 设计 v1.1.6](2026-09-26-s4-ai-dm-design.md)
 9. [S4 AI DM 产品宪法 v1.1](2026-09-26-s4-ai-dm-constitution.md)
+10. [主持人纠错与最小持久化设计草案 v0.1.0](2026-09-28-host-recovery-persistence-design.md)
+
+## P1 Proposed
+
+- [主持人纠错与最小持久化设计 v1.0.0](2026-09-28-host-recovery-persistence-design.md)
+  - 状态：`frozen`
+  - 将冻结规格中的 `HOST_PATCH`、快照回退、强制模板、SQLite 快照、
+    事件日志和 token digest 恢复整理成上线前 P1 范围。
+  - 对应逐任务 TDD 计划：
+    `docs/superpowers/plans/2026-09-28-host-recovery-persistence.md`。
+  - 用户已于 2026-09-28 批准 P1 实现契约；implementation plan 已通过
+    第三轮 fresh-context 复核，`projectmem #0243` 已关闭，可从 Task 1
+    开始执行。
 
 ## S4 Current
 
@@ -43,7 +56,8 @@ v1.5.6 / v1.1.6 进一步要求显式 intent 严格重校验，非法 channel �
 
 Template-only implementation plan 已完成；`S4-01` 至 `S4-06` 已实现、
 通过独立复核并由用户本地验收。`S4-07` 已完成生产实现、真实浏览器
-E2E、独立复核和完整交付门禁，用户验收单独记录。当前最终本地门禁为
+E2E、独立复核和完整交付门禁，并已于 2026-09-28 由用户正式验收通过。
+当前最终本地门禁为
 backend `640 passed, 10 skipped`、latency `8 passed, 2 skipped`、
 Vitest `166 passed`、Playwright `14 passed`。生产 `SEAT_PROMPT`
 由 `RoomActor` 从领域 outbox 生成，浏览器证据直接来自真实 seat 消息，

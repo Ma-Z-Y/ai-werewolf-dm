@@ -6,14 +6,24 @@ from pydantic import ValidationError
 
 from tests.factories import (
     ROOM_ID,
+    core_at_role_reveal,
+    core_at_wolf,
+    host_actor,
+    make_envelope,
     minimal_night_script,
     role_reveal_script,
 )
+from werewolf_dm.application.core import DomainSeqAllocator, FrozenClock, GameCore
 from werewolf_dm.application.replay import ReplayStep, replay
-from werewolf_dm.domain.contracts import CommandErrorCode, SystemTimeout
+from werewolf_dm.domain.contracts import (
+    CommandErrorCode,
+    HostPauseCommand,
+    SystemTimeout,
+)
 from werewolf_dm.domain.enums import EventType, Phase
-from werewolf_dm.domain.replay import state_hash
+from werewolf_dm.domain.replay import event_log_digest, state_hash
 from werewolf_dm.domain.state_machine import initial_state
+from werewolf_dm.infrastructure.persistence import CommandDedupeKey
 
 
 def test_same_seed_and_commands_produce_same_hashes():
@@ -186,3 +196,167 @@ def test_replay_revalidates_model_constructed_steps():
 def test_replay_rejects_empty_step_list():
     with pytest.raises(ValueError):
         replay(ROOM_ID, seed=101, steps=())
+
+
+def test_game_core_restore_preserves_state_revision_events_and_dedupe() -> None:
+    steps = minimal_night_script()
+    result = replay(ROOM_ID, seed=101, steps=steps)
+    final_step = steps[-1]
+    assert final_step.actor is not None
+    final_result = result.command_results[-1]
+    dedupe_key = CommandDedupeKey(
+        command_id=final_step.envelope.command_id,
+        actor_type=final_step.actor.actor_type,
+        actor_key=str(final_step.actor.seat_id),
+    )
+
+    core = GameCore.restore(
+        room_id=ROOM_ID,
+        seed=101,
+        clock=FrozenClock(final_step.now),
+        state=result.final_state,
+        events=result.events,
+        command_results={dedupe_key: final_result},
+    )
+
+    assert core.state == result.final_state
+    assert core.events == result.events
+    assert core.submit(final_step.envelope, final_step.actor) == final_result
+    assert core.events == result.events
+
+
+@pytest.mark.parametrize(
+    ("state_update", "events"),
+    (
+        ({"event_count": 999}, None),
+        ({"event_log_digest": "f" * 64}, None),
+        ({}, ("reversed",)),
+    ),
+)
+def test_game_core_restore_rejects_inconsistent_history(
+    state_update: dict[str, object],
+    events: tuple[str, ...] | None,
+) -> None:
+    steps = minimal_night_script()
+    result = replay(ROOM_ID, seed=101, steps=steps)
+    state = result.final_state.model_copy(update=state_update)
+    restored_events = tuple(reversed(result.events)) if events == ("reversed",) else result.events
+
+    with pytest.raises(ValueError):
+        GameCore.restore(
+            room_id=ROOM_ID,
+            seed=101,
+            clock=FrozenClock(steps[-1].now),
+            state=state,
+            events=restored_events,
+        )
+
+
+def test_stage_submit_does_not_mutate_until_commit() -> None:
+    core = core_at_role_reveal()
+    envelope = make_envelope(
+        host_actor(),
+        HostPauseCommand(reason="inspection"),
+        expected_revision=core.state.revision,
+    )
+    state_before = core.state
+    events_before = core.events
+    cache_before = dict(core.command_dedupe_cache)
+
+    mutation = core.stage_submit(
+        envelope,
+        host_actor(),
+        next_domain_seq=DomainSeqAllocator(start=1),
+    )
+
+    assert core.state == state_before
+    assert core.events == events_before
+    assert core.command_dedupe_cache == cache_before
+    assert mutation.command_result.accepted is True
+
+    core.commit(mutation)
+
+    assert core.state.revision > state_before.revision
+    assert len(core.events) > len(events_before)
+    assert core.command_dedupe_cache != cache_before
+
+
+def test_stage_tick_has_no_dedupe_key_or_cached_result() -> None:
+    core = core_at_wolf().core
+    assert core.state.deadline_at is not None
+    core.clock.set(core.state.deadline_at)
+
+    mutation = core.stage_tick(next_domain_seq=DomainSeqAllocator(start=1))
+
+    assert mutation.dedupe_key is None
+    assert mutation.cache_result is False
+    assert mutation.command_result.accepted is True
+    assert mutation.next_state.revision > core.state.revision
+
+
+def test_revision_conflict_and_actor_mismatch_are_not_dedupe_results() -> None:
+    core = core_at_role_reveal()
+    cache_before = dict(core.command_dedupe_cache)
+    revision_conflict = make_envelope(
+        host_actor(),
+        HostPauseCommand(reason="stale"),
+        expected_revision=core.state.revision + 1,
+    )
+    wrong_room = core.state.room_id
+    actor = host_actor().model_copy(update={"room_id": uuid4()})
+
+    conflict = core.stage_submit(
+        revision_conflict,
+        host_actor(),
+        next_domain_seq=DomainSeqAllocator(start=1),
+    )
+    mismatch = core.stage_submit(
+        make_envelope(
+            host_actor(),
+            HostPauseCommand(reason="wrong room"),
+            expected_revision=core.state.revision,
+        ),
+        actor,
+        next_domain_seq=DomainSeqAllocator(start=1),
+    )
+
+    assert conflict.cache_result is False
+    assert mismatch.cache_result is False
+    assert core.command_dedupe_cache == cache_before
+    assert core.state.room_id == wrong_room
+
+
+def test_event_log_digest_matches_restored_events() -> None:
+    result = replay(ROOM_ID, seed=101, steps=minimal_night_script())
+
+    assert result.final_state.event_count == len(result.events)
+    assert result.final_state.event_log_digest == event_log_digest(result.events)
+
+
+def test_game_core_restore_rejects_missing_event_revision() -> None:
+    result = replay(ROOM_ID, seed=101, steps=minimal_night_script())
+    jump_index = next(
+        index
+        for index, event in enumerate(result.events[1:], start=1)
+        if event.revision > result.events[index - 1].revision
+    )
+    modified_events = tuple(
+        event.model_copy(update={"revision": event.revision + (1 if index >= jump_index else 0)})
+        for index, event in enumerate(result.events)
+    )
+    modified_state = result.final_state.model_copy(
+        update={
+            "revision": result.final_state.revision + 1,
+            "event_count": len(modified_events),
+            "event_log_digest": event_log_digest(modified_events),
+        }
+    )
+
+    with pytest.raises(ValueError, match="revision"):
+        GameCore.restore(
+            room_id=ROOM_ID,
+            seed=101,
+            clock=FrozenClock(minimal_night_script()[-1].now),
+            state=modified_state,
+            events=modified_events,
+        )

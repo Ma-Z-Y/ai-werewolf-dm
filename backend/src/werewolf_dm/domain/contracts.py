@@ -29,6 +29,7 @@ class CommandErrorCode(StrEnum):
     WITCH_SELF_RESCUE_FORBIDDEN = "WITCH_SELF_RESCUE_FORBIDDEN"
     GAME_ENDED = "GAME_ENDED"
     HOST_RECOVERY_NOT_IN_S1 = "HOST_RECOVERY_NOT_IN_S1"
+    COMMAND_VOIDED_BY_REWIND = "COMMAND_VOIDED_BY_REWIND"
 
 
 class JoinRoomCommand(StrictModel):
@@ -240,6 +241,19 @@ class HostVisibility(StrictModel):
     scope: Literal["host"] = "host"
 
 
+class CommandDedupeKey(StrictModel):
+    command_id: UUID
+    actor_type: Literal["seat", "host"]
+    actor_key: str = Field(min_length=1)
+
+
+class SnapshotReason(StrEnum):
+    PAUSED = "PAUSED"
+    PRE_CORRECTION = "PRE_CORRECTION"
+    PHASE_START = "PHASE_START"
+    GAME_END = "GAME_END"
+
+
 EventVisibility = Annotated[
     PublicVisibility | SeatVisibility | FactionVisibility | HostVisibility,
     Field(discriminator="scope"),
@@ -363,6 +377,56 @@ class HostResumedPayload(EventPayload):
     pass
 
 
+class HostCorrectionAudit(EventPayload):
+    audit_kind: Literal["HOST_CORRECTION_APPLIED", "HOST_CORRECTION_REJECTED"]
+    status: Literal["APPLIED", "REJECTED"]
+    command_id: UUID
+    patch_type: str = Field(min_length=1)
+    before_revision: int = Field(ge=0)
+    after_revision: int = Field(ge=0)
+    diff: Mapping[str, JsonValue]
+    reason: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_audit_status(self) -> Self:
+        expected_status = "APPLIED" if self.audit_kind == "HOST_CORRECTION_APPLIED" else "REJECTED"
+        if self.status != expected_status:
+            raise ValueError("host correction audit kind and status must agree")
+        if self.status == "REJECTED" and self.after_revision != self.before_revision:
+            raise ValueError("rejected host correction cannot advance revision")
+        object.__setattr__(self, "diff", freeze_json_mapping(self.diff))
+        return self
+
+    @field_serializer("diff")
+    def serialize_diff(
+        self,
+        diff: Mapping[str, JsonValue],
+    ) -> dict[str, JsonValue]:
+        return cast(dict[str, JsonValue], _thaw_json(diff))
+
+
+class HostRewindAudit(EventPayload):
+    command_id: UUID
+    snapshot_id: UUID
+    from_revision: int = Field(ge=0)
+    to_revision: int = Field(ge=0)
+    restored_state_digest: str = Field(min_length=1)
+
+
+class HostTemplateForcedAudit(StrictModel):
+    command_id: UUID
+    revision: int = Field(ge=0)
+
+
+class HostCompensationAudit(EventPayload):
+    command_id: UUID
+    patch_type: str = Field(min_length=1)
+    before_revision: int = Field(ge=0)
+    after_revision: int = Field(ge=0)
+    post_state_digest: str = Field(min_length=1)
+    snapshot_id: UUID
+
+
 class GameEndedPayload(EventPayload):
     winner: Faction
 
@@ -388,6 +452,9 @@ EVENT_PAYLOAD_MODELS: dict[EventType, type[EventPayload]] = {
     EventType.TIMEOUT_APPLIED: TimeoutAppliedPayload,
     EventType.HOST_PAUSED: HostPausedPayload,
     EventType.HOST_RESUMED: HostResumedPayload,
+    EventType.HOST_CORRECTION_APPLIED: HostCorrectionAudit,
+    EventType.HOST_COMPENSATION_APPLIED: HostCompensationAudit,
+    EventType.HOST_REWIND_APPLIED: HostRewindAudit,
     EventType.GAME_ENDED: GameEndedPayload,
 }
 
@@ -412,6 +479,9 @@ EVENT_VISIBILITY_SCOPES: dict[EventType, frozenset[str]] = {
     EventType.TIMEOUT_APPLIED: frozenset({"public"}),
     EventType.HOST_PAUSED: frozenset({"public"}),
     EventType.HOST_RESUMED: frozenset({"public"}),
+    EventType.HOST_CORRECTION_APPLIED: frozenset({"host"}),
+    EventType.HOST_COMPENSATION_APPLIED: frozenset({"host"}),
+    EventType.HOST_REWIND_APPLIED: frozenset({"host"}),
     EventType.GAME_ENDED: frozenset({"public"}),
 }
 
@@ -448,6 +518,12 @@ class DomainEvent(StrictModel):
                 raise ValueError("public death events cannot contain cause")
             if self.visibility.scope == "host" and validated.cause is None:
                 raise ValueError("host death-audit events require cause")
+        if (
+            self.event_type is EventType.HOST_CORRECTION_APPLIED
+            and isinstance(validated, HostCorrectionAudit)
+            and validated.audit_kind != "HOST_CORRECTION_APPLIED"
+        ):
+            raise ValueError("host correction applied event requires applied audit")
         if isinstance(self.visibility, SeatVisibility):
             seat_payload_field = EVENT_SEAT_VISIBILITY_FIELDS.get(self.event_type)
             if (

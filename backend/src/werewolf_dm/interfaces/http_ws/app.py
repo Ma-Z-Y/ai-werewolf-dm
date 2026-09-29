@@ -57,12 +57,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if owns_registry:
         app.state.room_registry = build_production_registry()
         registry = cast(RoomRegistry, app.state.room_registry)
-        reaper_task = asyncio.create_task(
-            reap_periodically(
-                registry,
-                interval_seconds=app.state.reaper_interval_seconds,
+        try:
+            await registry.start_rooms()
+        except BaseException:
+            await registry.close(close_store=True)
+            app.state.room_registry = None
+            raise
+        else:
+            reaper_task = asyncio.create_task(
+                reap_periodically(
+                    registry,
+                    interval_seconds=app.state.reaper_interval_seconds,
+                )
             )
-        )
     try:
         yield
     finally:
@@ -73,8 +80,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if owns_registry:
             registry = cast(RoomRegistry, app.state.room_registry)
             try:
-                for room_code in tuple(registry.rooms):
-                    await registry.remove_room(room_code)
+                await registry.close(close_store=True)
             finally:
                 app.state.room_registry = None
 
@@ -85,7 +91,7 @@ def create_app(
     latency: LatencyRecorder | None = None,
     reaper_interval_seconds: float = 60.0,
 ) -> FastAPI:
-    app = FastAPI(title="Werewolf DM", version="0.3.0", lifespan=lifespan)
+    app = FastAPI(title="Werewolf DM", version="0.4.0", lifespan=lifespan)
     latency = latency or LatencyRecorder(window=100)
     app.state.room_registry = registry
     app.state.token_ttl = token_ttl

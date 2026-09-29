@@ -9,8 +9,11 @@ import {
 import type { HostControlView } from "../../protocol/models";
 import type { RoomSocketState } from "../../realtime/RoomSocket";
 
-import { HostCorrectionNotice } from "./HostCorrectionNotice";
 import { HostDiagnostics } from "./HostDiagnostics";
+import {
+  HostRecoveryPanel,
+  type HostRecoveryPayload,
+} from "./HostRecoveryPanel";
 
 export interface HostControlScreenProps {
   roomCode: string;
@@ -19,6 +22,7 @@ export interface HostControlScreenProps {
   errorMessage: string | null;
   pausePending: boolean;
   resumePending: boolean;
+  recoveryPending: boolean;
   pairingCode: string | null;
   pairingExpired: boolean;
   pairingPending: boolean;
@@ -26,6 +30,7 @@ export interface HostControlScreenProps {
   auditPending: boolean;
   onPause: () => void;
   onResume: () => void;
+  onRecoveryPatch: (payload: HostRecoveryPayload) => void;
   onGeneratePairing: () => void;
   onRevokeDisplay: () => void;
   onDownloadAudit: () => void;
@@ -38,6 +43,7 @@ export function HostControlScreen({
   errorMessage,
   pausePending,
   resumePending,
+  recoveryPending,
   pairingCode,
   pairingExpired,
   pairingPending,
@@ -45,11 +51,12 @@ export function HostControlScreen({
   auditPending,
   onPause,
   onResume,
+  onRecoveryPatch,
   onGeneratePairing,
   onRevokeDisplay,
   onDownloadAudit,
 }: HostControlScreenProps) {
-  const commandPending = pausePending || resumePending;
+  const commandPending = pausePending || resumePending || recoveryPending;
 
   return (
     <main className="min-h-screen bg-surface px-5 py-8 text-text sm:px-8">
@@ -154,7 +161,12 @@ export function HostControlScreen({
               </div>
             </section>
 
-            <HostCorrectionNotice />
+            <HostRecoveryPanel
+              commandPending={pausePending || resumePending}
+              onPatchSubmit={onRecoveryPatch}
+              paused={hostControl.paused}
+              pending={recoveryPending}
+            />
           </div>
 
           <aside className="grid content-start gap-6 border-text-muted/30 lg:border-l lg:pl-8">

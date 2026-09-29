@@ -17,6 +17,10 @@ from werewolf_dm.domain.contracts import (
     CommandErrorCode,
     CommandType,
     DomainEvent,
+    HostCompensationAudit,
+    HostCorrectionAudit,
+    HostRewindAudit,
+    HostVisibility,
     JoinRoomCommand,
     PassSpeechCommand,
     PublicVisibility,
@@ -28,6 +32,7 @@ from werewolf_dm.domain.contracts import (
     build_event,
 )
 from werewolf_dm.domain.enums import EventType, Phase, Role
+from werewolf_dm.domain.replay import event_log_digest, state_hash
 from werewolf_dm.domain.visibility import (
     ProjectionAccessError,
     legal_actions,
@@ -36,6 +41,9 @@ from werewolf_dm.domain.visibility import (
     project_public_view,
     project_seat_view,
 )
+
+_HOST_COMMAND_ID = UUID("10000000-0000-0000-0000-000000000001")
+_HOST_SNAPSHOT_ID = UUID("50000000-0000-0000-0000-000000000001")
 
 
 def _advance_one_day(core) -> None:
@@ -74,6 +82,67 @@ def _seat_view(state, seat_id: int):
         state,
         seat_id,
         AuthenticatedActor(actor_type="seat", seat_id=seat_id, room_id=state.room_id),
+    )
+
+
+def _state_with_events(core, *events: DomainEvent):
+    return core.state.model_copy(
+        update={
+            "revision": events[-1].revision,
+            "event_count": len(events),
+            "event_log_digest": event_log_digest(tuple(events)),
+        }
+    )
+
+
+def _host_correction_event(core, *, revision: int, event_ordinal: int) -> DomainEvent:
+    return build_event(
+        cause_id=_HOST_COMMAND_ID,
+        event_ordinal=event_ordinal,
+        room_id=core.state.room_id,
+        revision=revision,
+        event_type=EventType.HOST_CORRECTION_APPLIED,
+        visibility=HostVisibility(),
+        payload=HostCorrectionAudit(
+            audit_kind="HOST_CORRECTION_APPLIED",
+            status="APPLIED",
+            command_id=_HOST_COMMAND_ID,
+            patch_type="SET_ALIVE",
+            before_revision=revision - 1,
+            after_revision=revision,
+            diff={"players": [{"seat_id": 1, "alive": False}]},
+            reason="host correction",
+        ),
+        created_at=core.clock(),
+    )
+
+
+def _role_correction_event(
+    core,
+    *,
+    revision: int,
+    event_ordinal: int,
+    before: list[dict[str, object]],
+    after: list[dict[str, object]],
+) -> DomainEvent:
+    return build_event(
+        cause_id=_HOST_COMMAND_ID,
+        event_ordinal=event_ordinal,
+        room_id=core.state.room_id,
+        revision=revision,
+        event_type=EventType.HOST_CORRECTION_APPLIED,
+        visibility=HostVisibility(),
+        payload=HostCorrectionAudit(
+            audit_kind="HOST_CORRECTION_APPLIED",
+            status="APPLIED",
+            command_id=_HOST_COMMAND_ID,
+            patch_type="SET_ROLE",
+            before_revision=revision - 1,
+            after_revision=revision,
+            diff={"players": {"before": before, "after": after}},
+            reason="host correction",
+        ),
+        created_at=core.clock(),
     )
 
 
@@ -161,7 +230,266 @@ def test_vis_013_privileged_trace_and_snapshot_payloads_require_host(
     assert audit.room_id == core_game_end.state.room_id
     assert audit.raw_events == tuple(core_game_end.events)
     assert audit.dm_trace == ()
+    assert audit.recovery_audit == ()
     assert audit.snapshots == ()
+
+
+def test_host_recovery_audit_is_host_only(core, actor, host):
+    event = _host_correction_event(core, revision=1, event_ordinal=1)
+    state = _state_with_events(core, event)
+
+    audit = project_host_audit(state, (event,), host())
+    replay = project_player_replay(state, (event,), actor(1))
+
+    assert audit.raw_events == (event,)
+    assert replay.events == ()
+    assert "HOST_CORRECTION_APPLIED" not in project_public_view(state).model_dump_json()
+    assert "HOST_CORRECTION_APPLIED" not in _seat_view(state, 1).model_dump_json()
+    assert "HOST_CORRECTION_APPLIED" not in replay.model_dump_json()
+
+
+def test_player_replay_never_includes_host_recovery_audit(core, actor, host):
+    correction = _host_correction_event(core, revision=1, event_ordinal=1)
+    compensation = build_event(
+        cause_id=_HOST_COMMAND_ID,
+        event_ordinal=2,
+        room_id=core.state.room_id,
+        revision=2,
+        event_type=EventType.HOST_COMPENSATION_APPLIED,
+        visibility=HostVisibility(),
+        payload=HostCompensationAudit(
+            command_id=_HOST_COMMAND_ID,
+            patch_type="SET_ALIVE",
+            before_revision=1,
+            after_revision=2,
+            post_state_digest="a" * 64,
+            snapshot_id=_HOST_SNAPSHOT_ID,
+        ),
+        created_at=core.clock(),
+    )
+    rewind = build_event(
+        cause_id=_HOST_COMMAND_ID,
+        event_ordinal=3,
+        room_id=core.state.room_id,
+        revision=3,
+        event_type=EventType.HOST_REWIND_APPLIED,
+        visibility=HostVisibility(),
+        payload=HostRewindAudit(
+            command_id=_HOST_COMMAND_ID,
+            snapshot_id=_HOST_SNAPSHOT_ID,
+            from_revision=2,
+            to_revision=0,
+            restored_state_digest="b" * 64,
+        ),
+        created_at=core.clock(),
+    )
+    events = (correction, compensation, rewind)
+    state = _state_with_events(core, *events)
+
+    audit = project_host_audit(state, events, host())
+    replay = project_player_replay(state, events, actor(1))
+
+    assert audit.raw_events == events
+    assert replay.events == ()
+    serialized = replay.model_dump_json()
+    for event_type in (
+        "HOST_CORRECTION_APPLIED",
+        "HOST_COMPENSATION_APPLIED",
+        "HOST_REWIND_APPLIED",
+    ):
+        assert event_type not in serialized
+
+
+def test_rewind_restores_projection_role_timeline(core_at_night, actor, host):
+    core = core_at_night
+    base_events = tuple(core.events)
+    base_revision = core.state.revision
+    roles = [(player.seat_id, player.role) for player in core.state.players]
+    first = next(
+        (seat_id, role)
+        for index, (seat_id, role) in enumerate(roles)
+        for other_seat_id, other_role in roles[index + 1 :]
+        if role is not None and other_role is not None and role is not other_role
+        for other in [(other_seat_id, other_role)]
+    )
+    first_seat_id, first_role = first
+    second_seat_id, second_role = next(
+        (seat_id, role)
+        for seat_id, role in roles
+        if seat_id != first_seat_id and role is not None and role is not first_role
+    )
+    before = [{"seat_id": seat_id, "role": role.value} for seat_id, role in roles]
+    after = [
+        {
+            "seat_id": seat_id,
+            "role": (
+                second_role.value
+                if seat_id == first_seat_id
+                else first_role.value
+                if seat_id == second_seat_id
+                else role.value
+            ),
+        }
+        for seat_id, role in roles
+    ]
+    correction = _role_correction_event(
+        core,
+        revision=base_revision + 1,
+        event_ordinal=len(base_events) + 1,
+        before=before,
+        after=after,
+    )
+    rewind = build_event(
+        cause_id=_HOST_COMMAND_ID,
+        event_ordinal=len(base_events) + 2,
+        room_id=core.state.room_id,
+        revision=base_revision + 2,
+        event_type=EventType.HOST_REWIND_APPLIED,
+        visibility=HostVisibility(),
+        payload=HostRewindAudit(
+            command_id=_HOST_COMMAND_ID,
+            snapshot_id=_HOST_SNAPSHOT_ID,
+            from_revision=base_revision + 1,
+            to_revision=base_revision,
+            restored_state_digest="b" * 64,
+        ),
+        created_at=core.clock(),
+    )
+    events = (*base_events, correction, rewind)
+    state = core.state.model_copy(
+        update={
+            "revision": rewind.revision,
+            "event_count": len(events),
+            "event_log_digest": event_log_digest(events),
+        }
+    )
+
+    assert project_host_audit(state, events, host()).raw_events == events
+    assert project_player_replay(state, events, actor(1)).events
+
+
+def test_non_role_player_diff_does_not_break_projection(core, host):
+    event = _role_correction_event(
+        core,
+        revision=1,
+        event_ordinal=1,
+        before=[{"seat_id": 1, "role": None}],
+        after=[{"seat_id": 1, "role": None}],
+    )
+    state = _state_with_events(core, event)
+
+    assert project_host_audit(state, (event,), host()).raw_events == (event,)
+
+
+def test_rewind_to_zero_cannot_reseed_forged_role_timeline(core_at_night, host):
+    rewind = build_event(
+        cause_id=_HOST_COMMAND_ID,
+        event_ordinal=1,
+        room_id=core_at_night.state.room_id,
+        revision=1,
+        event_type=EventType.HOST_REWIND_APPLIED,
+        visibility=HostVisibility(),
+        payload=HostRewindAudit(
+            command_id=_HOST_COMMAND_ID,
+            snapshot_id=_HOST_SNAPSHOT_ID,
+            from_revision=0,
+            to_revision=0,
+            restored_state_digest="c" * 64,
+        ),
+        created_at=core_at_night.clock(),
+    )
+    correction = _role_correction_event(
+        core_at_night,
+        revision=2,
+        event_ordinal=2,
+        before=[],
+        after=[
+            {"seat_id": player.seat_id, "role": player.role.value}
+            for player in core_at_night.state.players
+            if player.role is not None
+        ],
+    )
+    state = _state_with_events(core_at_night, rewind, correction)
+
+    with pytest.raises(ProjectionAccessError, match="PROJECTION_EVENT_MISMATCH"):
+        project_host_audit(state, (rewind, correction), host())
+
+
+def test_rejected_audit_does_not_change_state_hash_or_revision(core):
+    before_hash = state_hash(core.state)
+    before_revision = core.state.revision
+    rejected = HostCorrectionAudit(
+        audit_kind="HOST_CORRECTION_REJECTED",
+        status="REJECTED",
+        command_id=_HOST_COMMAND_ID,
+        patch_type="SET_ROLE",
+        before_revision=before_revision,
+        after_revision=before_revision,
+        diff={},
+        reason="invalid role",
+    )
+
+    assert state_hash(core.state) == before_hash
+    assert core.state.revision == before_revision
+    assert rejected.status == "REJECTED"
+    with pytest.raises(ValidationError):
+        build_event(
+            cause_id=_HOST_COMMAND_ID,
+            event_ordinal=1,
+            room_id=core.state.room_id,
+            revision=1,
+            event_type=EventType.HOST_CORRECTION_APPLIED,
+            visibility=HostVisibility(),
+            payload=rejected,
+            created_at=core.clock(),
+        )
+
+
+def test_host_correction_audit_diff_is_deeply_frozen():
+    audit = HostCorrectionAudit(
+        audit_kind="HOST_CORRECTION_APPLIED",
+        status="APPLIED",
+        command_id=_HOST_COMMAND_ID,
+        patch_type="SET_ALIVE",
+        before_revision=0,
+        after_revision=1,
+        diff={"players": [{"seat_id": 1, "alive": False}]},
+        reason="host correction",
+    )
+
+    with pytest.raises(TypeError):
+        audit.diff["players"] = ()
+    with pytest.raises(AttributeError):
+        audit.diff["players"].append({"seat_id": 2, "alive": False})
+    with pytest.raises(TypeError):
+        audit.diff["players"][0]["alive"] = True
+    assert audit.diff["players"][0]["alive"] is False
+
+
+def test_applied_correction_has_separate_compensation_event(core):
+    correction = _host_correction_event(core, revision=1, event_ordinal=1)
+    compensation = build_event(
+        cause_id=_HOST_COMMAND_ID,
+        event_ordinal=2,
+        room_id=core.state.room_id,
+        revision=2,
+        event_type=EventType.HOST_COMPENSATION_APPLIED,
+        visibility=HostVisibility(),
+        payload=HostCompensationAudit(
+            command_id=_HOST_COMMAND_ID,
+            patch_type="SET_ALIVE",
+            before_revision=1,
+            after_revision=2,
+            post_state_digest="c" * 64,
+            snapshot_id=_HOST_SNAPSHOT_ID,
+        ),
+        created_at=core.clock(),
+    )
+
+    assert correction.event_type is EventType.HOST_CORRECTION_APPLIED
+    assert compensation.event_type is EventType.HOST_COMPENSATION_APPLIED
+    assert correction.event_id != compensation.event_id
+    assert correction.visibility.scope == compensation.visibility.scope == "host"
 
 
 def test_vis_014_seat_actor_cannot_cross_boundary(core, actor, envelope):

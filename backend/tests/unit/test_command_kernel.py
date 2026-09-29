@@ -4,7 +4,10 @@ import pytest
 
 from werewolf_dm.domain.contracts import (
     AuthenticatedActor,
+    CommandDedupeKey,
     CommandEnvelope,
+    CommandErrorCode,
+    CommandResult,
     HostPauseCommand,
     JoinRoomCommand,
     SetReadyCommand,
@@ -18,6 +21,47 @@ def test_idem_001_same_command_id_returns_first_result(core, actor, envelope):
     second = core.submit(cmd, actor(1))
     assert first == second
     assert core.state.revision == first.revision
+
+
+def test_tombstoned_command_is_rejected_before_dedupe_and_revision(
+    core,
+    actor,
+    envelope,
+):
+    tombstoned = envelope(
+        actor(1),
+        JoinRoomCommand(seat_id=1, display_name="A"),
+        expected_revision=999,
+    )
+    dedupe_key = CommandDedupeKey(
+        command_id=tombstoned.command_id,
+        actor_type="seat",
+        actor_key="1",
+    )
+    cached = CommandResult(
+        command_id=tombstoned.command_id,
+        accepted=True,
+        revision=123,
+        event_ids=(),
+    )
+    core.command_dedupe_cache[(tombstoned.command_id, "seat", 1)] = cached
+    before_state = core.state
+    before_events = core.events
+    before_cache = dict(core.command_dedupe_cache)
+
+    result = core.submit(
+        tombstoned,
+        actor(1),
+        discarded_command_tombstones=(dedupe_key,),
+    )
+
+    assert result.accepted is False
+    assert result.error_code is CommandErrorCode.COMMAND_VOIDED_BY_REWIND
+    assert result.event_ids == ()
+    assert core.state == before_state
+    assert core.events == before_events
+    assert core.state.outbox == before_state.outbox
+    assert core.command_dedupe_cache == before_cache
 
 
 def test_idem_002_stale_revision_conflicts_without_cache(core, actor, envelope):

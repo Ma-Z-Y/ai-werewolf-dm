@@ -8,7 +8,11 @@ import {
 import { mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-import { advanceRoom, assertPlayerLayout } from "./fixtures";
+import {
+  advanceRoom,
+  assertPlayerLayout,
+  controlHeaders,
+} from "./fixtures";
 
 type VoteTargets = Record<number, number>;
 type NightWitchAction = "antidote" | "skip";
@@ -83,6 +87,20 @@ export async function captureState(
   await page.screenshot({ path, fullPage: true });
 }
 
+export async function resetE2EState(
+  request: APIRequestContext,
+): Promise<void> {
+  const response = await request.post(
+    "http://127.0.0.1:8000/__test__/reset",
+    { headers: controlHeaders },
+  );
+  if (!response.ok()) {
+    throw new Error(
+      `resetE2EState failed: ${response.status()} ${await response.text()}`,
+    );
+  }
+}
+
 export async function assertStageHasNoPrivateFacts(page: Page): Promise<void> {
   for (const secret of [
     "WEREWOLF",
@@ -134,6 +152,35 @@ export async function createDisplayPairing(page: Page): Promise<string> {
     throw new Error("display pairing code is missing");
   }
   return code;
+}
+
+export async function pauseHostGame(page: Page): Promise<number> {
+  const revision = Number(
+    await page.getByTestId("host-revision").textContent(),
+  );
+  await page.getByRole("button", { name: "暂停游戏" }).click();
+  await expect(page.getByRole("button", { name: "恢复游戏" })).toBeVisible();
+  await expect(page.getByTestId("host-revision")).toHaveText(
+    String(revision + 1),
+  );
+  return revision + 1;
+}
+
+export async function applyPotionRecoveryPatch(page: Page): Promise<number> {
+  const revision = Number(
+    await page.getByTestId("host-revision").textContent(),
+  );
+  await page.getByLabel("修正类型").selectOption("SET_POTION");
+  await page.getByLabel("解药可用").uncheck();
+  await page.getByLabel("确认原因").fill("E2E restart recovery proof");
+  await page
+    .getByRole("button", { name: "提交主持人纠错" })
+    .click();
+  await expect(page.getByRole("button", { name: "提交主持人纠错" })).toBeEnabled();
+  await expect(page.getByTestId("host-revision")).toHaveText(
+    String(revision + 1),
+  );
+  return revision + 1;
 }
 
 export async function joinAndReady(

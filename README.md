@@ -19,9 +19,18 @@
   构建和 Playwright 六人浏览器闭环。
 - S4 Template-Only AI DM：S4-01 至 S4-06 已完成实现、独立复核并获用户
   验收。S4-07 已完成生产实现、真实浏览器 E2E、独立复核和完整交付
-  门禁，用户验收单独记录。`RoomActor` 现在从领域 outbox 生产
+  门禁，并已于 2026-09-28 由用户正式验收通过。`RoomActor` 现在从领域
+  outbox 生产
   `SEAT_PROMPT`，浏览器隔离证据直接来自真实生产消息，不再需要
   E2E-only injection。Provider/LLM 仍保持 deferred。
+- P1 主持人恢复与最小持久化：Task 1-8 已在本分支本地实现和验证。恢复
+  事务、精确快照回退、force-template、host-only WebSocket/UI 和单一
+  `/audit` 已接通；Task 8 使用跨两个 app 进程共享的临时 SQLite，证明
+  host/seat/display 原凭据重连、事件与 recovery audit 恢复、快照集合不
+  重复，以及 seat replay/display/public privacy 负例。2026-09-29 已按
+  用户指定的等价验收方式完成验收：六座位真实协议三局、六人浏览器流程
+  与重启恢复均通过。该工作仍仅限本地，尚未 push、创建 PR、merge、tag
+  或 release。
 
 准确状态和下一步以
 [`docs/specs/README.md`](docs/specs/README.md) 与

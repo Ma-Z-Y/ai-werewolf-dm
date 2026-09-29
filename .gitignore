@@ -43,6 +43,7 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+backend/data/
 
 # Local archives
 *.zip

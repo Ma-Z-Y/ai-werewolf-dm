@@ -104,7 +104,10 @@ export function getHostAudit(
   roomCode: string,
   hostToken: string,
 ): Promise<HostAuditExport> {
-  return apiFetch(`${roomPath(roomCode)}/audit`, {
-    headers: { Authorization: `Bearer ${hostToken}` },
-  });
+  return apiFetch(
+    `${roomPath(roomCode)}/audit?include=dm_trace,recovery_audit,snapshots`,
+    {
+      headers: { Authorization: `Bearer ${hostToken}` },
+    },
+  );
 }
