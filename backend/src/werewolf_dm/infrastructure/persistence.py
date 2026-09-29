@@ -101,6 +101,8 @@ class PersistedRoomRuntime(StrictModel):
     next_domain_seq: int = Field(ge=0)
     recovery_epoch: int = Field(ge=0)
     discarded_command_tombstones: tuple[CommandDedupeKey, ...]
+    dm_trace_cutoff: int = Field(default=0, ge=0)
+    dm_transport_trace_cutoff: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
     def freeze_runtime(self) -> Self:

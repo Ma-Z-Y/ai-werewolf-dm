@@ -21,6 +21,7 @@ from werewolf_dm.application.core import (
     DomainSeqAllocator,
     GameCore,
     PersistenceCoordinator,
+    validate_reconstruction_runtime,
 )
 from werewolf_dm.application.dm_contracts import (
     DMAdmissionResult,
@@ -536,6 +537,14 @@ class RoomActor:
         self.published_kinds: list[str] = []
         self.dm_trace: list[DMTraceRecord] = list(dm_traces)
         self.dm_transport_trace: list[DMTraceRecord] = list(dm_transport_traces)
+        self._dm_trace_cutoff = runtime.dm_trace_cutoff if runtime is not None else 0
+        self._dm_transport_trace_cutoff = (
+            runtime.dm_transport_trace_cutoff if runtime is not None else 0
+        )
+        if self._dm_trace_cutoff > len(self.dm_trace) or self._dm_transport_trace_cutoff > len(
+            self.dm_transport_trace
+        ):
+            raise ValueError("DM trace cutoff exceeds persisted trace history")
         self.last_trace: DMTraceRecord | None = None
         self._recovery_audit = recovery_audit
         self._snapshots = snapshots
@@ -554,6 +563,8 @@ class RoomActor:
                 self._next_domain_seq_floor(self.core.state),
             )
         )
+        if runtime is not None:
+            validate_reconstruction_runtime(self.core.state, runtime)
         self.closed = False
         self._started = False
         self._task: asyncio.Task[None] | None = None
@@ -579,6 +590,14 @@ class RoomActor:
     @property
     def client_outbox_seq(self) -> int:
         return self.outbox_seq
+
+    @property
+    def metrics_dm_trace(self) -> tuple[DMTraceRecord, ...]:
+        return tuple(self.dm_trace[self._dm_trace_cutoff :])
+
+    @property
+    def metrics_dm_transport_trace(self) -> tuple[DMTraceRecord, ...]:
+        return tuple(self.dm_transport_trace[self._dm_transport_trace_cutoff :])
 
     @property
     def published_message_ids(self) -> tuple[UUID, ...]:
@@ -1066,6 +1085,8 @@ class RoomActor:
             ),
             recovery_epoch=(self.recovery_epoch if recovery_epoch is None else recovery_epoch),
             discarded_command_tombstones=self._discarded_command_tombstones,
+            dm_trace_cutoff=self._dm_trace_cutoff,
+            dm_transport_trace_cutoff=self._dm_transport_trace_cutoff,
         )
 
     @staticmethod
@@ -1169,6 +1190,12 @@ class RoomActor:
         self._published_message_ids = set(runtime.published_message_ids)
         self.recovery_epoch = runtime.recovery_epoch
         self._discarded_command_tombstones = tuple(runtime.discarded_command_tombstones)
+        self._dm_trace_cutoff = runtime.dm_trace_cutoff
+        self._dm_transport_trace_cutoff = runtime.dm_transport_trace_cutoff
+        if self._dm_trace_cutoff > len(self.dm_trace) or self._dm_transport_trace_cutoff > len(
+            self.dm_transport_trace
+        ):
+            raise ValueError("DM trace cutoff exceeds persisted trace history")
         if traces:
             self.dm_trace.extend(traces)
             self.last_trace = traces[-1]

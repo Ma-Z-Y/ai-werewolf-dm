@@ -452,6 +452,47 @@ def test_recovery_audit_is_host_only_and_includes_persisted_records(
     assert "snapshot" not in seat_response.text
 
 
+def test_malformed_recovery_command_returns_safe_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _ = _app_with_registry(tmp_path, monkeypatch)
+    with client:
+        created = client.post(
+            "/rooms",
+            json={"display_name": "Host"},
+        ).json()
+        with client.websocket_connect("/ws") as socket:
+            _connect(socket, created["host_token"])
+            socket.send_json(
+                {
+                    "type": "command",
+                    "command": {
+                        "schema_version": "command.v1",
+                        "command_id": str(uuid4()),
+                        "room_id": created["room_id"],
+                        "expected_revision": 0,
+                        "issued_at": _START.isoformat(),
+                        "payload": {
+                            "command_type": "HOST_PATCH",
+                            "patch": {
+                                "patch_type": "SET_VOTE",
+                                "voter_seat_id": 1,
+                                "round_id": "not-a-uuid",
+                                "target_seat_id": None,
+                            },
+                        },
+                    },
+                }
+            )
+            error = socket.receive_json()
+
+    assert error["type"] == "error"
+    assert error["code"] == "BAD_REQUEST"
+    assert error["message"] == "请求不合法"
+    assert "not-a-uuid" not in str(error)
+
+
 def test_restart_restores_room_state_tokens_events_and_contract(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -144,6 +144,7 @@ export interface HostAuditExport {
   state: Record<string, unknown>;
   raw_events: unknown[];
   dm_trace: unknown[];
+  recovery_audit: unknown[];
   snapshots: unknown[];
 }
 

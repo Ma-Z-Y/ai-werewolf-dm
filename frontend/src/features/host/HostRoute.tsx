@@ -270,6 +270,10 @@ export function HostRoute() {
       }
 
       if (message.type === "error") {
+        hostCommandRef.current = null;
+        setPausePending(false);
+        setResumePending(false);
+        setRecoveryPending(false);
         if (
           message.code === "TOKEN_INVALID" ||
           message.code === "TOKEN_EXPIRED"

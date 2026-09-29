@@ -3,7 +3,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4
 
 import pytest
 
@@ -27,7 +27,8 @@ from werewolf_dm.application.core import (
     GameCore,
     PersistenceCoordinator,
 )
-from werewolf_dm.application.dm_contracts import DMAnnouncementSlot
+from werewolf_dm.application.dm_contracts import DMAnnouncementSlot, DMTraceRecord
+from werewolf_dm.application.dm_metrics import build_room_dm_metrics
 from werewolf_dm.application.host_recovery import HostRecoveryService
 from werewolf_dm.application.rooms import (
     HostControlUpdate,
@@ -45,6 +46,7 @@ from werewolf_dm.domain.contracts import (
     HostPatch,
     HostPatchCommand,
     HostPauseCommand,
+    HostResumeCommand,
     HostRewindToSnapshotCommand,
     HostTemplateForcedAudit,
     SetAlivePatch,
@@ -57,10 +59,20 @@ from werewolf_dm.domain.contracts import (
     VoteCommand,
 )
 from werewolf_dm.domain.enums import EventType, Faction, Phase, Role
-from werewolf_dm.domain.model import NightState, PrivateFact, SeerCheckRecord
+from werewolf_dm.domain.model import NightState, PrivateFact, SeerCheckRecord, Vote
 from werewolf_dm.domain.replay import event_log_digest
-from werewolf_dm.domain.state_machine import ApplyOutcome, apply_command, winner_for
-from werewolf_dm.domain.visibility import project_public_view, project_seat_view
+from werewolf_dm.domain.state_machine import (
+    ApplyOutcome,
+    apply_command,
+    deterministic_uuid,
+    winner_for,
+)
+from werewolf_dm.domain.visibility import (
+    project_host_audit,
+    project_player_replay,
+    project_public_view,
+    project_seat_view,
+)
 from werewolf_dm.infrastructure.persistence import (
     PersistedRoom,
     PersistedRoomRuntime,
@@ -150,7 +162,15 @@ def _actor(
     core: GameCore,
     *,
     runtime: PersistedRoomRuntime | None = None,
+    dm_traces: tuple[DMTraceRecord, ...] = (),
 ) -> RoomActor:
+    resolved_runtime = runtime
+    if resolved_runtime is None:
+        max_outbox_seq = max((item.seq for item in core.state.outbox), default=0)
+        resolved_runtime = _runtime(
+            outbox_seq=max_outbox_seq,
+            next_domain_seq=max_outbox_seq + 1,
+        )
     return RoomActor(
         room_id=ROOM_ID,
         room_code="REC001",
@@ -160,7 +180,8 @@ def _actor(
         last_activity_at=START_TIME,
         core=core,
         coordinator=PersistenceCoordinator(store),
-        runtime=runtime or _runtime(),
+        runtime=resolved_runtime,
+        dm_traces=dm_traces,
     )
 
 
@@ -206,6 +227,24 @@ def _living_other(core: GameCore, seat_id: int) -> int:
 
 def fact_payload(fact: PrivateFact) -> dict[str, object]:
     return {key: value for key, value in fact.payload.items()}
+
+
+def _private_fact_types(core: GameCore, seat_id: int) -> set[str]:
+    return {
+        fact.fact_type
+        for fact in project_seat_view(
+            core.state,
+            seat_id,
+            seat_actor(seat_id),
+        ).private_facts
+    }
+
+
+def _votes_with_first_self_target(core: GameCore) -> tuple[Vote, ...]:
+    round_ = core.state.vote_round
+    assert round_ is not None
+    voter_seat_id = round_.eligible_voter_ids[0]
+    return (Vote(voter_seat_id=voter_seat_id, target_seat_id=voter_seat_id),)
 
 
 def test_apply_host_patch_entrypoint_exists() -> None:
@@ -322,6 +361,67 @@ def test_set_role_patch_swaps_roles_without_changing_rulepack_counts() -> None:
         player.role for player in before.players
     )
     assert outcome.next_state.revision == before.revision + 1
+
+
+def test_set_role_rebuilds_role_derived_private_facts_for_both_seats() -> None:
+    scenario, _ = core_at_witch()
+    core = _pause(scenario.core)
+    former_wolf_id = scenario.wolf_ids[0]
+    former_witch_id = scenario.witch_id
+
+    result = core.submit(
+        make_envelope(
+            host_actor(),
+            HostPatchCommand(
+                patch=SetRolePatch(
+                    seat_id=former_wolf_id,
+                    role=Role.WITCH,
+                )
+            ),
+            expected_revision=core.state.revision,
+            now=core.clock(),
+        ),
+        host_actor(),
+    )
+
+    assert result.accepted is True
+    new_witch = _private_fact_types(core, former_wolf_id)
+    new_wolf = _private_fact_types(core, former_witch_id)
+    assert {"WITCH_POTIONS", "WITCH_KILL_TARGET"} <= new_witch
+    assert {"WOLF_TEAM", "WOLF_DECISION"}.isdisjoint(new_witch)
+    assert {"WOLF_TEAM", "WOLF_DECISION"} <= new_wolf
+    assert {"WITCH_POTIONS", "WITCH_KILL_TARGET"}.isdisjoint(new_wolf)
+
+
+def test_set_role_correction_keeps_host_audit_and_player_replay_projectable() -> None:
+    scenario, _ = core_at_witch()
+    core = _pause(scenario.core)
+    former_wolf_id = scenario.wolf_ids[0]
+
+    result = core.submit(
+        make_envelope(
+            host_actor(),
+            HostPatchCommand(
+                patch=SetRolePatch(
+                    seat_id=former_wolf_id,
+                    role=Role.WITCH,
+                )
+            ),
+            expected_revision=core.state.revision,
+            now=core.clock(),
+        ),
+        host_actor(),
+    )
+
+    assert result.accepted is True
+    host_audit = project_host_audit(core.state, core.events, host_actor())
+    seat_replay = project_player_replay(
+        core.state,
+        core.events,
+        seat_actor(former_wolf_id),
+    )
+    assert host_audit.raw_events == core.events
+    assert seat_replay.room_id == core.state.room_id
 
 
 def test_set_phase_patch_cannot_jump_to_future_phase() -> None:
@@ -1104,6 +1204,49 @@ def test_rewind_tombstones_discarded_command_ids(tmp_path: Path) -> None:
     assert retry.command_result.error_code is CommandErrorCode.COMMAND_VOIDED_BY_REWIND
 
 
+def test_rewind_command_itself_is_tombstoned_before_precondition_checks(
+    tmp_path: Path,
+) -> None:
+    store, service, core = _paused_store_and_service(tmp_path)
+    snapshot_id = service.snapshot(ROOM_ID, SnapshotReason.PRE_CORRECTION.value)
+    command = HostRewindToSnapshotCommand(snapshot_id=snapshot_id)
+    rewind_command_id = deterministic_uuid(
+        NAMESPACE_URL,
+        ROOM_ID,
+        core.state.revision,
+        "HOST_REWIND_TO_SNAPSHOT",
+        snapshot_id,
+    )
+
+    first = service.rewind(
+        ROOM_ID,
+        command,
+        host_actor(),
+        core.clock(),
+    )
+    assert first.accepted is True
+    state, events = store.load_core(ROOM_ID)
+    restored = GameCore.restore(
+        room_id=ROOM_ID,
+        seed=state.seed,
+        clock=core.clock,
+        state=state,
+        events=events,
+    )
+
+    retried = service.stage_rewind(
+        core=restored,
+        runtime=store.load_room_runtime(ROOM_ID),
+        command=command,
+        actor=host_actor(),
+        now=core.clock(),
+        command_id=rewind_command_id,
+        expected_revision=restored.state.revision,
+    )
+
+    assert retried.command_result.error_code is CommandErrorCode.COMMAND_VOIDED_BY_REWIND
+
+
 async def test_rewind_rejects_old_epoch_tick_and_admission(tmp_path: Path) -> None:
     core = _pause(core_at_role_reveal())
     store = _persist_core(tmp_path, core)
@@ -1183,6 +1326,284 @@ def test_rewind_allocates_new_domain_seq_from_global_watermark(tmp_path: Path) -
 
     assert result.accepted is True
     assert store.load_room_runtime(ROOM_ID).next_domain_seq == 41
+
+
+async def test_rewind_rebases_next_transition_and_restart_keeps_sequence_above_watermark(
+    tmp_path: Path,
+) -> None:
+    core = _pause(core_at_day_vote())
+    store = _persist_core(
+        tmp_path,
+        core,
+        runtime=_runtime(next_domain_seq=40),
+    )
+    vote_round = core.state.vote_round
+    assert vote_round is not None
+    snapshot = PersistedSnapshot(
+        snapshot_id=uuid4(),
+        room_id=ROOM_ID,
+        revision=core.state.revision,
+        reason=SnapshotReason.PRE_CORRECTION,
+        state=core.state,
+        event_count=core.state.event_count,
+        created_at=core.clock(),
+    )
+    store.save_snapshot(snapshot)
+    service = HostRecoveryService(store)
+    rewind = service.rewind(
+        ROOM_ID,
+        HostRewindToSnapshotCommand(snapshot_id=snapshot.snapshot_id),
+        host_actor(),
+        core.clock(),
+    )
+    assert rewind.accepted is True
+
+    state, events = store.load_core(ROOM_ID)
+    restored = GameCore.restore(
+        room_id=ROOM_ID,
+        seed=state.seed,
+        clock=core.clock,
+        state=state,
+        events=events,
+    )
+    runtime = store.load_room_runtime(ROOM_ID)
+    actor = _actor(store, restored, runtime=runtime)
+    await actor.start()
+
+    resume = await actor.submit_command(
+        make_envelope(
+            host_actor(),
+            HostResumeCommand(),
+            expected_revision=actor.core.state.revision,
+            now=core.clock(),
+        ),
+        host_actor(),
+    )
+    assert resume.accepted is True
+    round_ = actor.core.state.vote_round
+    assert round_ is not None
+    for voter_seat_id in round_.eligible_voter_ids:
+        target_seat_id = next(
+            seat_id for seat_id in round_.eligible_voter_ids if seat_id != voter_seat_id
+        )
+        vote = await actor.submit_command(
+            make_envelope(
+                seat_actor(voter_seat_id),
+                VoteCommand(target_seat_id=target_seat_id),
+                expected_revision=actor.core.state.revision,
+                now=core.clock(),
+            ),
+            seat_actor(voter_seat_id),
+        )
+        assert vote.accepted is True
+    resume_outbox = max(item.seq for item in actor.core.state.outbox)
+    assert resume_outbox >= 41
+    runtime_after_resume = store.load_room_runtime(ROOM_ID)
+    assert resume_outbox < runtime_after_resume.next_domain_seq
+    await actor.stop()
+
+    state, events = store.load_core(ROOM_ID)
+    restarted_core = GameCore.restore(
+        room_id=ROOM_ID,
+        seed=state.seed,
+        clock=core.clock,
+        state=state,
+        events=events,
+    )
+    restarted_runtime = store.load_room_runtime(ROOM_ID)
+    restarted = _actor(store, restarted_core, runtime=restarted_runtime)
+    await restarted.start()
+    assert restarted.domain_seq_allocator.current() == runtime_after_resume.next_domain_seq
+    assert max(item.seq for item in restarted.core.state.outbox) < (
+        restarted.domain_seq_allocator.current()
+    )
+    await restarted.stop()
+
+
+async def test_rewind_metrics_only_use_current_recovery_branch_after_restart(
+    tmp_path: Path,
+) -> None:
+    trace = DMTraceRecord(
+        trace_id=uuid4(),
+        intent_id=uuid4(),
+        template_variant_id="public-neutral-1",
+        catalog_version="v1",
+        source_event_ids=(uuid4(),),
+        channel="public",
+        audience_seat_ids=(),
+        admission_status="admitted",
+        elapsed_ms=3,
+    )
+    published_id = uuid4()
+    store, _service, core = _paused_store_and_service(
+        tmp_path,
+        runtime=_runtime(
+            outbox_seq=1,
+            next_domain_seq=2,
+            domain_to_transport={1: 1},
+            completed_domain_seqs=(1,),
+            processed_announcement_seq=1,
+            published_message_ids=(published_id,),
+        ),
+    )
+    store.save_dm_trace(ROOM_ID, "DM_TRACE", trace)
+    actor = _actor(
+        store,
+        core,
+        runtime=store.load_room_runtime(ROOM_ID),
+        dm_traces=(trace,),
+    )
+    await actor.start()
+    patch = await actor.submit_command(
+        make_envelope(
+            host_actor(),
+            _patch_command(),
+            expected_revision=actor.core.state.revision,
+            now=core.clock(),
+        ),
+        host_actor(),
+    )
+    assert patch.accepted is True
+    target = store.load_latest_pre_correction_snapshot(ROOM_ID)
+    rewind = await actor.submit_command(
+        make_envelope(
+            host_actor(),
+            HostRewindToSnapshotCommand(snapshot_id=target.snapshot_id),
+            expected_revision=actor.core.state.revision,
+            now=core.clock(),
+        ),
+        host_actor(),
+    )
+    assert rewind.accepted is True
+    assert actor.metrics_dm_trace == ()
+    current_metrics = build_room_dm_metrics(
+        actor.metrics_dm_trace,
+        actor.metrics_dm_transport_trace,
+        actor.domain_to_transport,
+    )
+    assert current_metrics.template_admitted == 0
+    assert current_metrics.completed_domain_slots == 0
+    await actor.stop()
+
+    runtime = store.load_room_runtime(ROOM_ID)
+    assert runtime.dm_trace_cutoff == 1
+    state, events = store.load_core(ROOM_ID)
+    restored_core = GameCore.restore(
+        room_id=ROOM_ID,
+        seed=state.seed,
+        clock=core.clock,
+        state=state,
+        events=events,
+    )
+    restarted = _actor(
+        store,
+        restored_core,
+        runtime=runtime,
+        dm_traces=store.load_dm_traces(ROOM_ID, "DM_TRACE"),
+    )
+    assert restarted.metrics_dm_trace == ()
+    restarted_metrics = build_room_dm_metrics(
+        restarted.metrics_dm_trace,
+        restarted.metrics_dm_transport_trace,
+        restarted.domain_to_transport,
+    )
+    assert restarted_metrics.template_admitted == 0
+
+
+def test_restore_rejects_self_voting_reconstruction(tmp_path: Path) -> None:
+    core = _pause(core_at_day_vote())
+    vote_round = core.state.vote_round
+    assert vote_round is not None
+    tampered_vote_round = vote_round.model_copy(
+        update={"votes": _votes_with_first_self_target(core)}
+    )
+    tampered_state = core.state.model_copy(update={"vote_round": tampered_vote_round})
+
+    with pytest.raises(ValueError):
+        GameCore.restore(
+            room_id=ROOM_ID,
+            seed=tampered_state.seed,
+            clock=core.clock,
+            state=tampered_state,
+            events=core.events,
+        )
+
+
+def test_patch_rejects_inconsistent_vote_reconstruction() -> None:
+    core = _pause(core_at_day_vote())
+    vote_round = core.state.vote_round
+    assert vote_round is not None
+    tampered_state = core.state.model_copy(
+        update={
+            "vote_round": vote_round.model_copy(
+                update={"votes": _votes_with_first_self_target(core)}
+            )
+        }
+    )
+    outcome = apply_command(
+        tampered_state,
+        make_envelope(
+            host_actor(),
+            HostPatchCommand(
+                patch=SetPotionPatch(
+                    antidote_available=False,
+                    poison_available=True,
+                )
+            ),
+            expected_revision=tampered_state.revision,
+            now=core.clock(),
+        ),
+        host_actor(),
+        core.clock(),
+    )
+
+    assert outcome.error_code is CommandErrorCode.INVALID_TARGET
+    assert outcome.next_state == tampered_state
+
+
+def test_rewind_rejects_inconsistent_snapshot_reconstruction(tmp_path: Path) -> None:
+    core = _pause(core_at_day_vote())
+    vote_round = core.state.vote_round
+    assert vote_round is not None
+    tampered_state = core.state.model_copy(
+        update={
+            "vote_round": vote_round.model_copy(
+                update={"votes": _votes_with_first_self_target(core)}
+            )
+        }
+    )
+    store = _persist_core(tmp_path, core)
+    snapshot = PersistedSnapshot(
+        snapshot_id=uuid4(),
+        room_id=ROOM_ID,
+        revision=tampered_state.revision,
+        reason=SnapshotReason.PRE_CORRECTION,
+        state=tampered_state,
+        event_count=tampered_state.event_count,
+        created_at=core.clock(),
+    )
+    store.save_snapshot(snapshot)
+    state, events = store.load_core(ROOM_ID)
+    restored = GameCore.restore(
+        room_id=ROOM_ID,
+        seed=state.seed,
+        clock=core.clock,
+        state=state,
+        events=events,
+    )
+
+    commit = HostRecoveryService(store).stage_rewind(
+        core=restored,
+        runtime=store.load_room_runtime(ROOM_ID),
+        command=HostRewindToSnapshotCommand(snapshot_id=snapshot.snapshot_id),
+        actor=host_actor(),
+        now=core.clock(),
+        command_id=uuid4(),
+        expected_revision=restored.state.revision,
+    )
+
+    assert commit.command_result.error_code is CommandErrorCode.INVALID_TARGET
+    assert store.load_core(ROOM_ID) == (state, events)
 
 
 def test_force_template_records_audit_without_enabling_provider(tmp_path: Path) -> None:

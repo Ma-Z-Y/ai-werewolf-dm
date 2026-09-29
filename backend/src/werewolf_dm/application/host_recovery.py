@@ -8,7 +8,12 @@ from uuid import NAMESPACE_URL, UUID
 
 from pydantic import JsonValue
 
-from werewolf_dm.application.core import DomainSeqAllocator, FrozenClock, GameCore
+from werewolf_dm.application.core import (
+    DomainSeqAllocator,
+    FrozenClock,
+    GameCore,
+    validate_reconstruction_runtime,
+)
 from werewolf_dm.domain.contracts import (
     EVENT_PAYLOAD_MODELS,
     AuthenticatedActor,
@@ -30,8 +35,7 @@ from werewolf_dm.domain.contracts import (
 from werewolf_dm.domain.enums import EventType, Phase
 from werewolf_dm.domain.model import GameState
 from werewolf_dm.domain.replay import event_log_digest, state_hash
-from werewolf_dm.domain.state_machine import deterministic_uuid, validate_invariants
-from werewolf_dm.domain.visibility import project_public_view, project_seat_view
+from werewolf_dm.domain.state_machine import deterministic_uuid, validate_reconstruction
 from werewolf_dm.infrastructure.persistence import (
     PersistedRecoveryAudit,
     PersistedRoomRuntime,
@@ -198,6 +202,26 @@ class HostRecoveryService:
                 error_code=CommandErrorCode.ACTOR_NOT_AUTHORIZED,
                 now=now,
             )
+        tombstone_key = CommandDedupeKey(
+            command_id=command_id,
+            actor_type="host",
+            actor_key="host",
+        )
+        if tombstone_key in runtime.discarded_command_tombstones:
+            return RecoveryCommit(
+                next_state=core.state,
+                events=(),
+                command_result=CommandResult(
+                    command_id=command_id,
+                    accepted=False,
+                    revision=core.state.revision,
+                    event_ids=(),
+                    error_code=CommandErrorCode.COMMAND_VOIDED_BY_REWIND,
+                ),
+                runtime=runtime,
+                snapshot=None,
+                audit=None,
+            )
         cached = core.command_dedupe_cache.get((command_id, "host", None))
         if cached is not None:
             return RecoveryCommit(
@@ -279,21 +303,28 @@ class HostRecoveryService:
                 "event_log_digest": event_log_digest(events),
             }
         )
-        validate_invariants(restored_state)
-        project_public_view(restored_state)
-        for seat_id in range(1, 7):
-            project_seat_view(
-                restored_state,
-                seat_id,
-                AuthenticatedActor(
-                    actor_type="seat",
-                    seat_id=seat_id,
-                    room_id=core.state.room_id,
-                ),
+        try:
+            validate_reconstruction(restored_state)
+        except ValueError:
+            return self._rejected_commit(
+                state=core.state,
+                runtime=runtime,
+                command_id=command_id,
+                patch_type=command.command_type.value,
+                error_code=CommandErrorCode.INVALID_TARGET,
+                now=now,
             )
 
         discarded = self._discarded_commands(core, snapshot.revision)
-        tombstones = tuple(dict.fromkeys((*runtime.discarded_command_tombstones, *discarded)))
+        tombstones = tuple(
+            dict.fromkeys(
+                (
+                    *runtime.discarded_command_tombstones,
+                    *discarded,
+                    tombstone_key,
+                )
+            )
+        )
         restored_next_domain_seq = restored_state.outbox[-1].seq + 1 if restored_state.outbox else 1
         next_domain_seq = max(runtime.next_domain_seq, restored_next_domain_seq) + 1
         next_runtime = PersistedRoomRuntime(
@@ -305,7 +336,15 @@ class HostRecoveryService:
             next_domain_seq=next_domain_seq,
             recovery_epoch=runtime.recovery_epoch + 1,
             discarded_command_tombstones=tombstones,
+            dm_trace_cutoff=len(self._store.load_dm_traces(core.state.room_id, "DM_TRACE")),
+            dm_transport_trace_cutoff=len(
+                self._store.load_dm_traces(
+                    core.state.room_id,
+                    "DM_TRANSPORT_TRACE",
+                )
+            ),
         )
+        validate_reconstruction_runtime(restored_state, next_runtime)
         snapshot_before_rewind = self._snapshot_for_state(
             core.state,
             SnapshotReason.PRE_CORRECTION,
@@ -470,6 +509,7 @@ class HostRecoveryService:
         room_id: UUID,
         commit: RecoveryCommit,
     ) -> None:
+        validate_reconstruction_runtime(commit.next_state, commit.runtime)
         try:
             previous_runtime = self._store.load_room_runtime(room_id)
         except PersistenceNotFoundError:
@@ -691,6 +731,8 @@ class HostRecoveryService:
             next_domain_seq=next_domain_seq,
             recovery_epoch=runtime.recovery_epoch,
             discarded_command_tombstones=tuple(runtime.discarded_command_tombstones),
+            dm_trace_cutoff=runtime.dm_trace_cutoff,
+            dm_transport_trace_cutoff=runtime.dm_transport_trace_cutoff,
         )
 
     @staticmethod

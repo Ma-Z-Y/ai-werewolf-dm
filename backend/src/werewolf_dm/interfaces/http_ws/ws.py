@@ -246,6 +246,15 @@ async def message_loop(
             )
         except (TypeError, ValueError):
             command_message = None
+        if command_message is None and isinstance(raw, dict) and raw.get("type") == "command":
+            sink.offer(
+                ErrorMessage(
+                    code=ErrorCode.BAD_REQUEST,
+                    message="请求不合法",
+                    request_id=uuid4(),
+                )
+            )
+            continue
         if command_message is not None:
             sink.record_client_activity()
             if actor is not None and actor.actor_type == "display":

@@ -22,6 +22,8 @@ const PHASES = [
   "WIN_CHECK",
 ] as const;
 const CHECKBOX_CLASS = "h-11 w-11 shrink-0";
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 type RecoveryPatchType =
   | "SET_ALIVE"
@@ -91,7 +93,7 @@ export function HostRecoveryPanel({
   const [targetSeatId, setTargetSeatId] = useState("");
   const [seerSeatId, setSeerSeatId] = useState("1");
   const [seerCheckTargetId, setSeerCheckTargetId] = useState("1");
-  const [checkDay, setCheckDay] = useState("0");
+  const [checkDay, setCheckDay] = useState("1");
   const [checkFaction, setCheckFaction] = useState<"WEREWOLF" | "GOOD">("GOOD");
   const [phase, setPhase] = useState<(typeof PHASES)[number]>("DAY_DISCUSSION");
 
@@ -124,7 +126,7 @@ export function HostRecoveryPanel({
         };
       case "SET_VOTE": {
         const target = targetSeatId === "" ? null : parseSeat(targetSeatId);
-        if (roundId.trim().length === 0) return null;
+        if (!UUID_PATTERN.test(roundId.trim())) return null;
         return {
           patch_type: "SET_VOTE",
           voter_seat_id: parseSeat(voterSeatId),
@@ -353,7 +355,7 @@ export function HostRecoveryPanel({
               <input
                 className="min-h-11 rounded-md border border-text-muted/40 bg-surface px-3 text-text"
                 disabled={controlsDisabled}
-                min={0}
+                min={1}
                 onChange={(event) => setCheckDay(event.target.value)}
                 type="number"
                 value={checkDay}

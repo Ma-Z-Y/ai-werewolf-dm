@@ -337,6 +337,104 @@ def validate_invariants(state: GameState) -> None:
         raise ValueError("dead player cannot be an active night actor")
 
 
+def _validate_vote_round_reconstruction(state: GameState) -> None:
+    round_ = state.vote_round
+    if round_ is None:
+        return
+    vote_phases = {Phase.DAY_VOTE, Phase.DAY_PK_VOTE}
+    if round_.closed:
+        if state.phase in vote_phases:
+            raise ValueError("closed vote round cannot remain in a vote phase")
+    elif round_.phase is not state.phase or state.phase not in vote_phases:
+        raise ValueError("open vote round phase must match the current vote phase")
+    if round_.round_index not in {1, 2}:
+        raise ValueError("vote round index is invalid")
+    candidate_ids = set(round_.candidate_seat_ids)
+    voter_ids: set[int] = set()
+    for vote in round_.votes:
+        if vote.voter_seat_id in voter_ids:
+            raise ValueError("a voter can vote only once per round")
+        voter_ids.add(vote.voter_seat_id)
+        if vote.voter_seat_id not in round_.eligible_voter_ids:
+            raise ValueError("vote voter must be eligible")
+        if vote.target_seat_id == vote.voter_seat_id:
+            raise ValueError("a voter cannot target their own seat")
+        if vote.target_seat_id is not None:
+            target = _player_at(state, vote.target_seat_id)
+            if target is None or (not round_.closed and not target.alive):
+                raise ValueError("vote target must be a living player")
+            if round_.phase is Phase.DAY_PK_VOTE and vote.target_seat_id not in candidate_ids:
+                raise ValueError("PK vote target must be a candidate")
+
+
+def _validate_private_fact_reconstruction(state: GameState) -> None:
+    players = {player.seat_id: player for player in state.players}
+    wolves = tuple(player.seat_id for player in state.players if player.role is Role.WEREWOLF)
+    fact_types = {
+        "WOLF_TEAM",
+        "WOLF_DECISION",
+        "WITCH_POTIONS",
+        "WITCH_KILL_TARGET",
+        "SEER_CHECK",
+    }
+    for fact in state.private_facts:
+        recipient = players.get(fact.recipient_seat_id)
+        if recipient is None or fact.fact_type not in fact_types:
+            raise ValueError("private fact recipient or type is invalid")
+        if fact.fact_type == "WOLF_TEAM":
+            if recipient.role is not Role.WEREWOLF:
+                raise ValueError("only a werewolf can receive WOLF_TEAM")
+            wolf_payload = fact.payload.get("seat_ids")
+            if not isinstance(wolf_payload, (list, tuple)):
+                raise ValueError("WOLF_TEAM seats must be a sequence")
+            normalized_wolves: list[int] = []
+            for seat_id in wolf_payload:
+                if not isinstance(seat_id, int) or isinstance(seat_id, bool):
+                    raise ValueError("WOLF_TEAM seats must be integers")
+                normalized_wolves.append(seat_id)
+            if tuple(normalized_wolves) != wolves:
+                raise ValueError("WOLF_TEAM must list the current wolf seats")
+        elif fact.fact_type == "WOLF_DECISION":
+            if recipient.role is not Role.WEREWOLF:
+                raise ValueError("only a werewolf can receive WOLF_DECISION")
+        elif fact.fact_type == "WITCH_POTIONS":
+            if recipient.role is not Role.WITCH:
+                raise ValueError("only the witch can receive WITCH_POTIONS")
+        elif fact.fact_type == "WITCH_KILL_TARGET":
+            if recipient.role is not Role.WITCH:
+                raise ValueError("only the witch can receive WITCH_KILL_TARGET")
+        elif recipient.role is not Role.SEER:
+            raise ValueError("only the seer can receive SEER_CHECK facts")
+
+
+def validate_reconstruction(state: GameState) -> None:
+    state = GameState.revalidate(state)
+    validate_invariants(state)
+
+    outbox_sequences = tuple(item.seq for item in state.outbox)
+    if outbox_sequences != tuple(sorted(outbox_sequences)):
+        raise ValueError("outbox sequences must be ordered")
+    if len(set(outbox_sequences)) != len(outbox_sequences):
+        raise ValueError("outbox sequences must be unique")
+
+    _validate_vote_round_reconstruction(state)
+    _validate_private_fact_reconstruction(state)
+
+    from werewolf_dm.domain.visibility import project_public_view, project_seat_view
+
+    project_public_view(state)
+    for seat_id in range(1, 7):
+        project_seat_view(
+            state,
+            seat_id,
+            AuthenticatedActor(
+                actor_type="seat",
+                seat_id=seat_id,
+                room_id=state.room_id,
+            ),
+        )
+
+
 def initial_state(room_id: UUID, seed: int) -> GameState:
     state = GameState(
         room_id=room_id,
@@ -2484,6 +2582,85 @@ def _rebuild_phase_start_facts(
     return state
 
 
+def _rebuild_role_private_facts(
+    state: GameState,
+    event_id: UUID,
+    revision: int,
+) -> GameState:
+    facts: list[PrivateFact] = []
+    wolf_ids = tuple(player.seat_id for player in state.players if player.role is Role.WEREWOLF)
+    if wolf_ids:
+        wolf_event_id = deterministic_uuid(event_id, "ROLE", "WOLF_TEAM")
+        facts.extend(
+            _private_fact_from_event_id(
+                wolf_event_id,
+                wolf_seat_id,
+                "WOLF_TEAM",
+                {"seat_ids": list(wolf_ids)},
+                revision=revision,
+                fact_ordinal=ordinal,
+            )
+            for ordinal, wolf_seat_id in enumerate(wolf_ids, start=1)
+        )
+    facts.extend(_wolf_decision_facts(state, event_id, revision))
+
+    witch = next(
+        (player for player in state.players if player.role is Role.WITCH),
+        None,
+    )
+    if witch is not None:
+        facts.append(
+            _private_fact_from_event_id(
+                event_id,
+                witch.seat_id,
+                "WITCH_POTIONS",
+                {
+                    "antidote_available": state.potions.antidote_available,
+                    "poison_available": state.potions.poison_available,
+                },
+                revision=revision,
+            )
+        )
+        if state.phase is Phase.NIGHT_WITCH and state.wolf_decision.target_seat_id is not None:
+            facts.append(
+                _private_fact_from_event_id(
+                    event_id,
+                    witch.seat_id,
+                    "WITCH_KILL_TARGET",
+                    {"target_seat_id": state.wolf_decision.target_seat_id},
+                    revision=revision,
+                )
+            )
+
+    seer = next(
+        (player for player in state.players if player.role is Role.SEER),
+        None,
+    )
+    if seer is not None:
+        facts.extend(
+            _seer_check_facts(
+                state,
+                event_id,
+                seer.seat_id,
+                state.seer_checks,
+                revision,
+            )
+        )
+    return _replace_private_facts(
+        state,
+        removed_types=frozenset(
+            {
+                "WOLF_TEAM",
+                "WOLF_DECISION",
+                "WITCH_POTIONS",
+                "WITCH_KILL_TARGET",
+                "SEER_CHECK",
+            }
+        ),
+        additions=tuple(facts),
+    )
+
+
 def _host_patch_players(
     state: GameState,
     seat_id: int,
@@ -2712,6 +2889,12 @@ def _host_patch_candidate(
         candidate_winner = winner_for(candidate)
         if candidate_winner is not None and candidate_winner is not winner_for(state):
             raise _HostPatchRejected(CommandErrorCode.INVALID_TARGET)
+    elif isinstance(patch, SetRolePatch):
+        candidate = _rebuild_role_private_facts(
+            candidate,
+            _host_patch_fact_event_id(command_id),
+            next_revision,
+        )
     elif isinstance(patch, SetSeerChecksPatch):
         candidate = _replace_private_facts(
             candidate,
@@ -2731,8 +2914,7 @@ def _host_patch_candidate(
             _host_patch_fact_event_id(command_id),
             next_revision,
         )
-    validate_invariants(candidate)
-    _validate_host_patch_projections(candidate)
+    validate_reconstruction(candidate)
     return candidate
 
 
@@ -2777,8 +2959,7 @@ def _apply_host_patch(
             now,
         )
         next_state = next_state.model_copy(update={"revision": next_revision})
-        validate_invariants(next_state)
-        _validate_host_patch_projections(next_state)
+        validate_reconstruction(next_state)
     except _HostPatchRejected as exc:
         return _error(state, exc.error_code)
     except ValueError:

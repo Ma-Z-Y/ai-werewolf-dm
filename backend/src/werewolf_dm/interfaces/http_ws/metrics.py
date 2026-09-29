@@ -161,12 +161,12 @@ def _template_metrics_for_registry(
     has_template_activity = False
     for actor in registry.rooms.values():
         has_template_activity = has_template_activity or bool(
-            actor.dm_trace or actor.dm_transport_trace or actor.domain_to_transport
+            actor.metrics_dm_trace or actor.metrics_dm_transport_trace or actor.domain_to_transport
         )
         room_metrics.append(
             build_room_dm_metrics(
-                actor.dm_trace,
-                actor.dm_transport_trace,
+                actor.metrics_dm_trace,
+                actor.metrics_dm_transport_trace,
                 actor.domain_to_transport,
             )
         )

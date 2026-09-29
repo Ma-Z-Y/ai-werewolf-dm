@@ -19,7 +19,7 @@ from werewolf_dm.domain.state_machine import (
     apply_command,
     deterministic_uuid,
     initial_state,
-    validate_invariants,
+    validate_reconstruction,
 )
 from werewolf_dm.domain.visibility import SeatView, project_seat_view
 from werewolf_dm.infrastructure.persistence import (
@@ -90,6 +90,16 @@ class DomainSeqAllocator:
         self._open_reservations.remove(reservation)
 
 
+def validate_reconstruction_runtime(
+    state: GameState,
+    runtime: PersistedRoomRuntime,
+) -> None:
+    validate_reconstruction(state)
+    max_outbox_seq = max((item.seq for item in state.outbox), default=0)
+    if runtime.next_domain_seq < 1 or runtime.next_domain_seq <= max_outbox_seq:
+        raise ValueError("runtime next_domain_seq must exceed every outbox sequence")
+
+
 @dataclass(frozen=True, slots=True)
 class CoreMutation:
     next_state: GameState
@@ -115,6 +125,7 @@ class PersistenceCoordinator:
         if self.store is None:
             return
         runtime = self._validated_runtime(runtime)
+        validate_reconstruction_runtime(mutation.next_state, runtime)
         with self.store.transaction():
             self.store.save_core(
                 room_id,
@@ -172,6 +183,8 @@ class PersistenceCoordinator:
             next_domain_seq=runtime.next_domain_seq,
             recovery_epoch=runtime.recovery_epoch,
             discarded_command_tombstones=tuple(runtime.discarded_command_tombstones),
+            dm_trace_cutoff=runtime.dm_trace_cutoff,
+            dm_transport_trace_cutoff=runtime.dm_transport_trace_cutoff,
         )
 
     @staticmethod
@@ -265,7 +278,7 @@ class GameCore:
             raise ValueError("restored state revision does not match history")
         if not restored_events and state.revision != 0:
             raise ValueError("empty restored event history requires revision zero")
-        validate_invariants(state)
+        validate_reconstruction(state)
 
         core = cls(room_id=room_id, seed=seed, clock=clock)
         core._state = state
@@ -352,8 +365,13 @@ class GameCore:
             outcome.next_state,
             next_domain_seq,
         )
+        next_state = self._rebase_outbox_delta(
+            self._state,
+            outcome.next_state,
+            reservations,
+        )
         return self._mutation(
-            next_state=outcome.next_state,
+            next_state=next_state,
             events=outcome.events,
             result=CommandResult(
                 command_id=envelope.command_id,
@@ -398,15 +416,18 @@ class GameCore:
             results.append(result)
             if outcome.error_code is not None:
                 break
-            reservations.extend(
-                self._reserve_outbox_delta(
-                    state,
-                    outcome.next_state,
-                    next_domain_seq,
-                )
+            new_reservations = self._reserve_outbox_delta(
+                state,
+                outcome.next_state,
+                next_domain_seq,
+            )
+            reservations.extend(new_reservations)
+            state = self._rebase_outbox_delta(
+                state,
+                outcome.next_state,
+                new_reservations,
             )
             appended_events.extend(outcome.events)
-            state = outcome.next_state
 
         if not results:
             no_op_id = deterministic_uuid(
@@ -552,6 +573,24 @@ class GameCore:
         if count == 0:
             return ()
         return (next_domain_seq.reserve(count),)
+
+    @staticmethod
+    def _rebase_outbox_delta(
+        previous_state: GameState,
+        next_state: GameState,
+        reservations: tuple[DomainSeqReservation, ...],
+    ) -> GameState:
+        if not reservations:
+            return next_state
+        new_items = next_state.outbox[len(previous_state.outbox) :]
+        expected_count = sum(reservation.count for reservation in reservations)
+        if len(new_items) != expected_count:
+            raise ValueError("outbox reservations must match appended items")
+        rebased = tuple(
+            item.model_copy(update={"seq": reservations[0].start + index})
+            for index, item in enumerate(new_items)
+        )
+        return next_state.model_copy(update={"outbox": (*previous_state.outbox, *rebased)})
 
     @staticmethod
     def _mutation(

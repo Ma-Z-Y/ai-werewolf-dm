@@ -243,13 +243,39 @@ describe("host recovery panel", () => {
         seer_seat_id: 1,
         checks: [
           {
-            day: 0,
+            day: 1,
             target_seat_id: 4,
             faction: "GOOD",
           },
         ],
       },
     });
+  });
+
+  it("requires a valid round UUID and defaults seer day to one", async () => {
+    const onSubmit = vi.fn();
+    render(
+      <HostRecoveryPanel
+        onPatchSubmit={onSubmit}
+        paused
+        pending={false}
+      />,
+    );
+    const user = userEvent.setup();
+
+    await user.selectOptions(screen.getByLabelText("修正类型"), "SET_VOTE");
+    await user.type(screen.getByLabelText("投票轮次"), "not-a-uuid");
+    await user.type(screen.getByLabelText("确认原因"), "投票轮次修正");
+    expect(
+      screen.getByRole("button", { name: "提交主持人纠错" }),
+    ).toBeDisabled();
+
+    await user.selectOptions(
+      screen.getByLabelText("修正类型"),
+      "SET_SEER_CHECKS",
+    );
+    expect(screen.getByLabelText("查验天数")).toHaveValue(1);
+    expect(screen.getByLabelText("查验天数")).toHaveAttribute("min", "1");
   });
 
   it("disables recovery submission while resume is pending", async () => {

@@ -331,6 +331,7 @@ describe("host control console", () => {
         state: { phase: "DAY_DISCUSSION" },
         raw_events: [],
         dm_trace: [],
+        recovery_audit: [],
         snapshots: [],
       }),
     );
@@ -344,7 +345,7 @@ describe("host control console", () => {
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     expect(fetchMock).toHaveBeenCalledWith(
-      "/rooms/ABCDEF/audit",
+      "/rooms/ABCDEF/audit?include=dm_trace,recovery_audit,snapshots",
       expect.objectContaining({
         headers: expect.objectContaining({
           Authorization: "Bearer host-token",
@@ -389,6 +390,7 @@ describe("host control console", () => {
           state: { phase: "DAY_DISCUSSION" },
           raw_events: [],
           dm_trace: [],
+          recovery_audit: [],
           snapshots: [],
         }),
       );
@@ -461,6 +463,32 @@ describe("host control console", () => {
     expect(
       screen.queryByText("internal detail must not render"),
     ).not.toBeInTheDocument();
+  });
+
+  it("clears recovery pending after a server error", async () => {
+    writeHostSessionForRoom();
+    renderHost();
+    const socket = await openHostSocket(hostControl(true, 7));
+    const user = userEvent.setup();
+
+    await user.selectOptions(screen.getByLabelText("修正类型"), "SET_POTION");
+    await user.type(screen.getByLabelText("确认原因"), "药水状态误标");
+    await user.click(screen.getByRole("button", { name: "提交主持人纠错" }));
+    expect(screen.getByRole("button", { name: "正在提交" })).toBeDisabled();
+
+    await act(async () => {
+      socket.message({
+        type: "error",
+        code: "BAD_REQUEST",
+        message: "请求不合法",
+        request_id: "request-2",
+      });
+    });
+
+    expect(screen.getByText("请求不合法")).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "提交主持人纠错" }),
+    ).toBeEnabled();
   });
 
   it("stops the old host console when another device takes over", async () => {

@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Literal
 from uuid import UUID
@@ -23,6 +24,7 @@ from werewolf_dm.domain.model import (
 )
 from werewolf_dm.domain.model import VoteSummary as BaseVoteSummary
 from werewolf_dm.domain.replay import event_log_digest
+from werewolf_dm.domain.state_machine import assign_roles
 
 
 # Vote progress is projection metadata; the persisted domain summary stays unchanged.
@@ -150,31 +152,96 @@ def _validate_event_log(
         raise ProjectionAccessError("PROJECTION_EVENT_MISMATCH")
     if event_log_digest(tuple(validated_events)) != state.event_log_digest:
         raise ProjectionAccessError("PROJECTION_EVENT_MISMATCH")
+    roles_by_seat: dict[int, Role] = {}
+    original_roles = {
+        assignment.seat_id: assignment.role for assignment in assign_roles(state.seed)
+    }
     for event in validated_events:
-        _validate_state_event_binding(state, event)
+        if event.event_type is EventType.HOST_CORRECTION_APPLIED:
+            _apply_role_correction(roles_by_seat, event)
+        _validate_state_event_binding(
+            event,
+            roles_by_seat,
+            original_roles,
+        )
+    current_roles = {
+        player.seat_id: player.role for player in state.players if player.role is not None
+    }
+    if roles_by_seat and roles_by_seat != current_roles:
+        raise ProjectionAccessError("PROJECTION_EVENT_MISMATCH")
     return tuple(validated_events)
 
 
-def _validate_state_event_binding(state: GameState, event: DomainEvent) -> None:
+def _role_payload(value: object) -> dict[int, Role]:
+    if not isinstance(value, (list, tuple)):
+        raise ProjectionAccessError("PROJECTION_EVENT_MISMATCH")
+    roles: dict[int, Role] = {}
+    for item in value:
+        if not isinstance(item, Mapping):
+            raise ProjectionAccessError("PROJECTION_EVENT_MISMATCH")
+        seat_id = item.get("seat_id")
+        role_value = item.get("role")
+        if type(seat_id) is not int or not isinstance(role_value, str):
+            raise ProjectionAccessError("PROJECTION_EVENT_MISMATCH")
+        try:
+            role = Role(role_value)
+        except ValueError:
+            raise ProjectionAccessError("PROJECTION_EVENT_MISMATCH") from None
+        if seat_id in roles:
+            raise ProjectionAccessError("PROJECTION_EVENT_MISMATCH")
+        roles[seat_id] = role
+    return roles
+
+
+def _apply_role_correction(
+    roles_by_seat: dict[int, Role],
+    event: DomainEvent,
+) -> None:
+    diff = event.fact_payload.get("diff")
+    if not isinstance(diff, Mapping) or "players" not in diff:
+        return
+    players_diff = diff["players"]
+    if not isinstance(players_diff, Mapping) or set(players_diff) != {
+        "before",
+        "after",
+    }:
+        return
+    before = _role_payload(players_diff.get("before"))
+    after = _role_payload(players_diff.get("after"))
+    if roles_by_seat and before != roles_by_seat:
+        raise ProjectionAccessError("PROJECTION_EVENT_MISMATCH")
+    roles_by_seat.clear()
+    roles_by_seat.update(after)
+
+
+def _validate_state_event_binding(
+    event: DomainEvent,
+    roles_by_seat: dict[int, Role],
+    original_roles: dict[int, Role],
+) -> None:
     if not isinstance(event.visibility, SeatVisibility):
         return
-    players = {player.seat_id: player for player in state.players}
-    actor = players.get(event.visibility.seat_id)
-    if actor is None or actor.role is None:
-        raise ProjectionAccessError("PROJECTION_EVENT_MISMATCH")
+    seat_id = event.visibility.seat_id
 
     if event.event_type is EventType.ROLE_ASSIGNED:
-        if actor.role.value != event.fact_payload.get("role"):
+        role_value = event.fact_payload.get("role")
+        if original_roles.get(seat_id) is None or original_roles[seat_id].value != role_value:
             raise ProjectionAccessError("PROJECTION_EVENT_MISMATCH")
-    elif event.event_type is EventType.SEER_CHECKED:
+        roles_by_seat[seat_id] = original_roles[seat_id]
+        return
+
+    actor_role = roles_by_seat.get(seat_id)
+    if actor_role is None:
+        raise ProjectionAccessError("PROJECTION_EVENT_MISMATCH")
+    if event.event_type is EventType.SEER_CHECKED:
         target_seat_id = event.fact_payload.get("target_seat_id")
-        target = players.get(target_seat_id) if isinstance(target_seat_id, int) else None
-        if actor.role is not Role.SEER or target is None or target.role is None:
+        target_role = roles_by_seat.get(target_seat_id) if isinstance(target_seat_id, int) else None
+        if actor_role is not Role.SEER or target_role is None:
             raise ProjectionAccessError("PROJECTION_EVENT_MISMATCH")
-        target_faction = Faction.WEREWOLF if target.role is Role.WEREWOLF else Faction.GOOD
+        target_faction = Faction.WEREWOLF if target_role is Role.WEREWOLF else Faction.GOOD
         if event.fact_payload.get("target_faction") != target_faction.value:
             raise ProjectionAccessError("PROJECTION_EVENT_MISMATCH")
-    elif event.event_type is EventType.WITCH_ACTION_RECORDED and actor.role is not Role.WITCH:
+    elif event.event_type is EventType.WITCH_ACTION_RECORDED and actor_role is not Role.WITCH:
         raise ProjectionAccessError("PROJECTION_EVENT_MISMATCH")
 
 
