@@ -15,9 +15,13 @@
   回归证据：同一临时 SQLite 跨两个 app 进程，原 host/seat/display
   凭据重连；raw events、recovery audit 和快照集合恢复且无重复；seat
   replay、display/public 不暴露 snapshot、diff、raw events 或 token。
+- P1 等价验收：六个合成座位通过真实 HTTP/WebSocket 完成三局
+  `GAME_END`，Playwright 六人完整流程和 host-recovery restart/privacy
+  通过，完整交付门禁为 backend `773 passed, 10 skipped`、latency
+  `8 passed, 2 skipped`、Vitest `175 passed`、Playwright `15 passed`。
 
-该变更当前仅存在本地分支，等待用户验收；尚未 push、创建 PR、merge、
-tag 或 release。
+该变更已于 2026-09-29 按用户指定的等价验收方式完成验收，但仍仅存在
+本地分支；尚未 push、创建 PR、merge、tag 或 release。
 
 ## 0.3.0 - 2026-09-28
 

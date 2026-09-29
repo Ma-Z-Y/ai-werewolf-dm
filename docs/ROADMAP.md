@@ -27,22 +27,26 @@
   outbox 投递座位提示，离线槽不阻塞后续槽，浏览器证据使用真实生产消息；
   生产实现、真实浏览器 E2E、独立复核和交付门禁已完成；用户已于
   2026-09-28 正式验收通过。
+- [x] P1 主持人恢复与最小持久化：SQLite 原子恢复事务、精确快照回退、
+  force-template、host-only WS/UI、单一 `/audit`、跨 app 进程 restart
+  recovery 和 seat/display/public privacy 负例已实现。2026-09-29 按用户
+  指定的等价验收方式完成六座位真实协议、六人浏览器流程和重启恢复验收；
+  该结论不替代真人主观体验判断。尚未 push、创建 PR、merge、tag 或
+  release。
 
 ## 下一步
 
-- [ ] P1 上线前补强：设计
-  `docs/specs/2026-09-28-host-recovery-persistence-design.md` 已冻结；
-  Task 1-8 已在本分支完成本地实现和验证，包括恢复事务、rewind、
-  force-template、host-only WS/UI、单一 `/audit`、跨 app 进程 restart
-  recovery 和 seat/display/public privacy 负例。该任务仍需用户验收后才能
-  标记完成；当前未 push、创建 PR、merge、tag 或 release。
+- [ ] 为已验收的 P1 分支取得明确的远端收口授权：push、创建 PR、通过
+  required checks/CodeQL/隔离 latency gate 后 squash merge，并另行决定
+  是否发布下一个 minor release。
+- [ ] 安排合适的真人六人局域网体验复核，重点验证易用性、节奏和主持人
+  主观负担；机制、协议、恢复与隐私已由代理等价验收覆盖。
 - [ ] 后续版本化设计 provider/LLM 重入。
 
 每项任务只有在实现、确定性测试、独立复核和用户验收都完成后才会标记为
 完成。正式版本只会在对应阶段的验收出口通过后发布。当前本地 P1 验证
-结果为 backend `761 passed, 10 skipped`、latency `8 passed, 2 skipped`、
-前端 Vitest `173 passed`、Playwright `15 passed`，ruff、format、
+结果为 backend `773 passed, 10 skipped`、latency `8 passed, 2 skipped`、
+前端 Vitest `175 passed`、Playwright `15 passed`，ruff、format、
 strict mypy、lint、typecheck 和 build 均通过。根 `verify-delivery.ps1`
-的源码/状态新鲜度检查需在最终 handoff 更新后重跑。S4 的历史本地与 CI
-基线仍作为已验收参考。CI 与根交付门禁同时覆盖后端、前端和隔离的
-latency job。
+已在最终 handoff 更新前通过。S4 的历史本地与 CI 基线仍作为已验收参考。
+CI 与根交付门禁同时覆盖后端、前端和隔离的 latency job。

@@ -27,8 +27,10 @@
   事务、精确快照回退、force-template、host-only WebSocket/UI 和单一
   `/audit` 已接通；Task 8 使用跨两个 app 进程共享的临时 SQLite，证明
   host/seat/display 原凭据重连、事件与 recovery audit 恢复、快照集合不
-  重复，以及 seat replay/display/public privacy 负例。该工作仍仅限本地，
-  等待用户验收；尚未 push、创建 PR、merge、tag 或 release。
+  重复，以及 seat replay/display/public privacy 负例。2026-09-29 已按
+  用户指定的等价验收方式完成验收：六座位真实协议三局、六人浏览器流程
+  与重启恢复均通过。该工作仍仅限本地，尚未 push、创建 PR、merge、tag
+  或 release。
 
 准确状态和下一步以
 [`docs/specs/README.md`](docs/specs/README.md) 与
