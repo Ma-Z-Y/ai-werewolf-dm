@@ -4,8 +4,8 @@ from uuid import UUID
 
 from pydantic import Field
 
-from werewolf_dm.application.rooms import RoomCommandErrorCode, RoomSnapshot
-from werewolf_dm.domain.contracts import CommandEnvelope
+from werewolf_dm.application.rooms import RoomSnapshot
+from werewolf_dm.domain.contracts import CommandEnvelope, CommandErrorCode
 from werewolf_dm.domain.model import StrictModel
 from werewolf_dm.domain.visibility import PublicView
 
@@ -92,5 +92,5 @@ class CommandAckMessage(StrictModel):
     command_id: UUID
     accepted: bool
     revision: int
-    error_code: RoomCommandErrorCode | None = None
+    error_code: CommandErrorCode | None = None
     outbox_seq: int

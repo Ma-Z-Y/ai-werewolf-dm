@@ -5,7 +5,7 @@ from collections import deque
 from collections.abc import Iterable
 from typing import cast
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Request
 from fastapi.routing import APIRoute
 from pydantic import Field
 
@@ -14,13 +14,10 @@ from werewolf_dm.application.dm_metrics import (
     DMMetrics,
     aggregate_dm_metrics,
     build_room_dm_metrics,
-    clip_dm_trace,
 )
 from werewolf_dm.application.rooms import RoomRegistry
 from werewolf_dm.domain.model import StrictModel
-from werewolf_dm.domain.visibility import HostAuditExport, project_host_audit
 from werewolf_dm.interfaces.http_ws.audit import router as audit_router
-from werewolf_dm.interfaces.http_ws.authorization import authorize_bearer
 
 
 class DMTemplateMetricsPayload(StrictModel):
@@ -178,45 +175,6 @@ def _template_metrics_for_registry(
     return DMTemplateMetricsPayload.from_metrics(aggregate_dm_metrics(room_metrics))
 
 
-def _replace_host_audit_route() -> None:
-    replacement = APIRouter(prefix="/rooms", tags=["exports"])
-
-    @replacement.get("/{room_code}/audit", response_model=HostAuditExport)
-    async def audit_with_dm_trace(
-        room_code: str,
-        request: Request,
-        include: str = Query(
-            default="",
-            description="Comma-separated audit sections; supports dm_trace.",
-        ),
-    ) -> HostAuditExport:
-        actor, authenticated, _ = authorize_bearer(request, room_code, "host")
-        audit = project_host_audit(actor.core.state, actor.core.events, authenticated)
-        requested = frozenset(value.strip() for value in include.split(",") if value.strip())
-        if "dm_trace" not in requested:
-            return audit
-        return audit.model_copy(
-            update={
-                "dm_trace": clip_dm_trace(
-                    actor.dm_trace,
-                    actor.dm_transport_trace,
-                )
-            }
-        )
-
-    audit_router.routes[:] = [
-        route
-        for route in audit_router.routes
-        if not (
-            isinstance(route, APIRoute)
-            and route.path.endswith("/{room_code}/audit")
-            and route.methods is not None
-            and "GET" in route.methods
-        )
-    ]
-    audit_router.routes[0:0] = replacement.routes
-
-
 def _host_audit_routes() -> tuple[APIRoute, ...]:
     return tuple(
         route
@@ -243,5 +201,4 @@ def _validate_audit_route_installation(
         raise RuntimeError("DM_TRACE_AUDIT_ROUTE_INVALID")
 
 
-_replace_host_audit_route()
 _validate_audit_route_installation()

@@ -8,18 +8,19 @@ import pytest
 
 from werewolf_dm.application.dm_contracts import DMTraceRecord
 from werewolf_dm.domain.contracts import (
+    CommandDedupeKey,
     CommandResult,
     DomainEvent,
     PublicVisibility,
     ReadyChangedPayload,
     RoomJoinedPayload,
+    SnapshotReason,
     build_event,
 )
 from werewolf_dm.domain.enums import EventType, Phase
 from werewolf_dm.domain.model import GameState
 from werewolf_dm.domain.replay import event_log_digest
 from werewolf_dm.infrastructure.persistence import (
-    CommandDedupeKey,
     PersistedRecoveryAudit,
     PersistedRoom,
     PersistedRoomRuntime,
@@ -170,7 +171,7 @@ def sample_snapshot() -> PersistedSnapshot:
         snapshot_id=SNAPSHOT_ID,
         room_id=ROOM_ID,
         revision=1,
-        reason="PRE_CORRECTION",
+        reason=SnapshotReason.PRE_CORRECTION,
         state=sample_state(),
         event_count=1,
         created_at=CREATED_AT,

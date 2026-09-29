@@ -24,13 +24,23 @@ from werewolf_dm.application.rooms import (
 )
 from werewolf_dm.domain.contracts import (
     AuthenticatedActor,
+    CommandDedupeKey,
     CommandEnvelope,
+    DomainEvent,
+    HostCompensationAudit,
+    HostCorrectionAudit,
     HostPauseCommand,
+    HostVisibility,
+    build_event,
 )
-from werewolf_dm.domain.replay import state_hash
+from werewolf_dm.domain.enums import EventType
+from werewolf_dm.domain.replay import event_log_digest, state_hash
 from werewolf_dm.domain.visibility import project_public_view, project_seat_view
 from werewolf_dm.infrastructure.persistence import (
+    PersistedRecoveryAudit,
     PersistedRoomRuntime,
+    PersistedSnapshot,
+    SnapshotReason,
     SQLiteRoomStore,
 )
 from werewolf_dm.interfaces.http_ws.app import create_app
@@ -106,6 +116,48 @@ async def _start_submit_stop(
         return await actor.submit_command(envelope, authenticated)
     finally:
         await actor.stop()
+
+
+def _host_correction_events(actor: RoomActor) -> tuple[DomainEvent, DomainEvent]:
+    command_id = uuid4()
+    snapshot_id = uuid4()
+    correction = build_event(
+        cause_id=command_id,
+        event_ordinal=1,
+        room_id=actor.room_id,
+        revision=1,
+        event_type=EventType.HOST_CORRECTION_APPLIED,
+        visibility=HostVisibility(),
+        payload=HostCorrectionAudit(
+            audit_kind="HOST_CORRECTION_APPLIED",
+            status="APPLIED",
+            command_id=command_id,
+            patch_type="SET_ALIVE",
+            before_revision=0,
+            after_revision=1,
+            diff={"players": [{"seat_id": 1, "alive": False}]},
+            reason="host correction",
+        ),
+        created_at=_START,
+    )
+    compensation = build_event(
+        cause_id=command_id,
+        event_ordinal=2,
+        room_id=actor.room_id,
+        revision=2,
+        event_type=EventType.HOST_COMPENSATION_APPLIED,
+        visibility=HostVisibility(),
+        payload=HostCompensationAudit(
+            command_id=command_id,
+            patch_type="SET_ALIVE",
+            before_revision=1,
+            after_revision=2,
+            post_state_digest="d" * 64,
+            snapshot_id=snapshot_id,
+        ),
+        created_at=_START,
+    )
+    return correction, compensation
 
 
 class RecordingSubscriber:
@@ -234,7 +286,9 @@ def test_player_replay_cannot_request_dm_trace_or_snapshots() -> None:
 
     assert response.status_code == 200
     replay = response.json()
-    assert replay.keys().isdisjoint({"dm_trace", "snapshots", "state", "raw_events"})
+    assert replay.keys().isdisjoint(
+        {"dm_trace", "recovery_audit", "snapshots", "state", "raw_events"}
+    )
 
 
 def test_host_audit_returns_complete_state_and_events() -> None:
@@ -252,11 +306,13 @@ def test_host_audit_returns_complete_state_and_events() -> None:
         "state",
         "raw_events",
         "dm_trace",
+        "recovery_audit",
         "snapshots",
     }
     assert audit["room_id"] == str(scenario.core.state.room_id)
     assert audit["revision"] == scenario.core.state.revision
     assert audit["dm_trace"] == []
+    assert audit["recovery_audit"] == []
     assert audit["snapshots"] == []
     assert len(audit["raw_events"]) == len(scenario.core.events)
 
@@ -280,6 +336,161 @@ def test_host_audit_returns_complete_state_and_events() -> None:
         5,
         6,
     }
+
+
+def test_host_audit_route_returns_recovery_records_but_seat_replay_does_not(
+    tmp_path: Path,
+) -> None:
+    store, registry = _open_registry(
+        tmp_path / "host-audit.sqlite3",
+        tokens=(_HOST_TOKEN, _SEAT_TOKEN),
+        room_codes=(_ROOM_CODE,),
+    )
+    created = registry.create_room(_TOKEN_TTL)
+    seat = registry.join_room(created.room_code, "player")
+    actor = registry.get_by_code(created.room_code)
+    snapshot = PersistedSnapshot(
+        snapshot_id=uuid4(),
+        room_id=actor.room_id,
+        revision=actor.core.state.revision,
+        reason=SnapshotReason.PAUSED,
+        state=actor.core.state,
+        event_count=actor.core.state.event_count,
+        created_at=_START,
+    )
+    recovery_audit = PersistedRecoveryAudit(
+        record_id=uuid4(),
+        room_id=actor.room_id,
+        command_id=uuid4(),
+        status="REJECTED",
+        patch_type="SET_ROLE",
+        before_revision=actor.core.state.revision,
+        after_revision=actor.core.state.revision,
+        diff={},
+        reason="rejected correction",
+        created_at=_START,
+    )
+    store.save_snapshot(snapshot)
+    store.append_recovery_audit(recovery_audit)
+    actor.refresh_host_audit()
+
+    with TestClient(create_app(registry), raise_server_exceptions=False) as client:
+        host_response = client.get(
+            f"/rooms/{_ROOM_CODE}/audit?include=dm_trace,recovery_audit,snapshots",
+            headers=_authorization(_HOST_TOKEN),
+        )
+        seat_response = client.get(
+            f"/rooms/{_ROOM_CODE}/replay?include=dm_trace,recovery_audit,snapshots",
+            headers=_authorization(seat.seat_token),
+        )
+
+    assert host_response.status_code == 200
+    host_audit = host_response.json()
+    assert host_audit["recovery_audit"][0]["record_id"] == str(recovery_audit.record_id)
+    assert host_audit["snapshots"][0]["snapshot_id"] == str(snapshot.snapshot_id)
+    assert seat_response.status_code == 200
+    assert (
+        seat_response.json()
+        .keys()
+        .isdisjoint({"dm_trace", "recovery_audit", "snapshots", "state", "raw_events"})
+    )
+    store.close()
+
+
+def test_applied_audit_exists_and_rejected_audit_does_not(tmp_path: Path) -> None:
+    store, registry = _open_registry(
+        tmp_path / "applied-audit.sqlite3",
+        tokens=(_HOST_TOKEN,),
+        room_codes=(_ROOM_CODE,),
+    )
+    created = registry.create_room(_TOKEN_TTL)
+    actor = registry.get_by_code(created.room_code)
+    correction, compensation = _host_correction_events(actor)
+    corrected_state = actor.core.state.model_copy(
+        update={
+            "revision": 2,
+            "event_count": 2,
+            "event_log_digest": event_log_digest((correction, compensation)),
+        }
+    )
+    applied_audit = PersistedRecoveryAudit(
+        record_id=uuid4(),
+        room_id=actor.room_id,
+        command_id=correction.causation_id,
+        status="APPLIED",
+        patch_type="SET_ALIVE",
+        before_revision=0,
+        after_revision=2,
+        before_state=actor.core.state,
+        after_state=corrected_state,
+        diff={"players": [{"seat_id": 1, "alive": False}]},
+        reason="applied correction",
+        created_at=_START,
+    )
+    rejected_audit = PersistedRecoveryAudit(
+        record_id=uuid4(),
+        room_id=actor.room_id,
+        command_id=uuid4(),
+        status="REJECTED",
+        patch_type="SET_ROLE",
+        before_revision=2,
+        after_revision=2,
+        diff={},
+        reason="rejected correction",
+        created_at=_START,
+    )
+    store.save_core(actor.room_id, corrected_state, (correction, compensation))
+    store.append_recovery_audit(applied_audit)
+    store.append_recovery_audit(rejected_audit)
+
+    loaded_audit = store.load_recovery_audit(actor.room_id)
+    loaded_state, loaded_events = store.load_core(actor.room_id)
+
+    assert {record.record_id for record in loaded_audit} == {
+        applied_audit.record_id,
+        rejected_audit.record_id,
+    }
+    assert {record.status for record in loaded_audit} == {"APPLIED", "REJECTED"}
+    assert loaded_state == corrected_state
+    assert tuple(event.event_type for event in loaded_events) == (
+        EventType.HOST_CORRECTION_APPLIED,
+        EventType.HOST_COMPENSATION_APPLIED,
+    )
+    assert all(event.visibility.scope == "host" for event in loaded_events)
+    store.close()
+
+
+def test_rejected_audit_exists_without_state_or_event_change(tmp_path: Path) -> None:
+    store, registry = _open_registry(
+        tmp_path / "rejected-audit.sqlite3",
+        tokens=(_HOST_TOKEN,),
+        room_codes=(_ROOM_CODE,),
+    )
+    created = registry.create_room(_TOKEN_TTL)
+    actor = registry.get_by_code(created.room_code)
+    before_state = actor.core.state
+    before_events = actor.core.events
+    store.save_core(actor.room_id, before_state, before_events)
+    rejected_audit = PersistedRecoveryAudit(
+        record_id=uuid4(),
+        room_id=actor.room_id,
+        command_id=uuid4(),
+        status="REJECTED",
+        patch_type="SET_PHASE",
+        before_revision=before_state.revision,
+        after_revision=before_state.revision,
+        diff={},
+        reason="rejected correction",
+        created_at=_START,
+    )
+
+    store.append_recovery_audit(rejected_audit)
+    loaded_state, loaded_events = store.load_core(actor.room_id)
+
+    assert loaded_state == before_state
+    assert loaded_events == before_events
+    assert store.load_recovery_audit(actor.room_id) == (rejected_audit,)
+    store.close()
 
 
 def test_seat_and_host_tokens_cannot_cross_export_scopes() -> None:
@@ -621,6 +832,48 @@ def test_stale_epoch_submit_is_rejected_without_mutation(
 
     assert actor.core.state == before_state
     assert actor.core.events == before_events
+
+
+def test_tombstoned_command_leaves_state_outbox_and_traces_unchanged() -> None:
+    actor = RoomActor(
+        room_id=UUID(int=702),
+        room_code="ROOM02",
+        seed=101,
+        clock=FrozenClock(_START),
+        expires_at=_START + _TOKEN_TTL,
+        last_activity_at=_START,
+    )
+    envelope = CommandEnvelope(
+        command_id=uuid4(),
+        room_id=actor.room_id,
+        expected_revision=actor.core.state.revision,
+        issued_at=_START,
+        payload=HostPauseCommand(reason="tombstoned"),
+    )
+    actor._discarded_command_tombstones = (
+        CommandDedupeKey(
+            command_id=envelope.command_id,
+            actor_type="host",
+            actor_key="host",
+        ),
+    )
+    before_state = actor.core.state
+    before_events = actor.core.events
+    before_outbox = actor.outbox_seq
+    before_traces = tuple(actor.dm_trace)
+    before_transport_traces = tuple(actor.dm_transport_trace)
+    before_mapping = dict(actor.domain_to_transport)
+
+    ack = asyncio.run(_start_submit_stop(actor, envelope, _host(actor.room_id)))
+
+    assert ack.accepted is False
+    assert ack.error_code == "COMMAND_VOIDED_BY_REWIND"
+    assert actor.core.state == before_state
+    assert actor.core.events == before_events
+    assert actor.outbox_seq == before_outbox
+    assert tuple(actor.dm_trace) == before_traces
+    assert tuple(actor.dm_transport_trace) == before_transport_traces
+    assert actor.domain_to_transport == before_mapping
 
 
 def test_submit_rollback_keeps_memory_state_events_dedupe_and_allocator(

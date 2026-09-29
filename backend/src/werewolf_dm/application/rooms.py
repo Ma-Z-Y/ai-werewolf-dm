@@ -13,7 +13,7 @@ from time import monotonic_ns
 from typing import Literal, Protocol, Self
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
-from pydantic import Field, ValidationError, model_validator
+from pydantic import Field, JsonValue, ValidationError, model_validator
 
 from werewolf_dm.application.core import (
     Clock,
@@ -57,8 +57,10 @@ from werewolf_dm.infrastructure.persistence import (
     PersistedAdmission,
     PersistedDMTrace,
     PersistedPublication,
+    PersistedRecoveryAudit,
     PersistedRoom,
     PersistedRoomRuntime,
+    PersistedSnapshot,
     PersistedToken,
     PersistenceError,
     PersistenceNotFoundError,
@@ -249,14 +251,11 @@ class RoomSubscriber(Protocol):
         raise NotImplementedError
 
 
-RoomCommandErrorCode = CommandErrorCode | Literal["COMMAND_VOIDED_BY_REWIND"]
-
-
 class RoomCommandAck(StrictModel):
     command_id: UUID
     accepted: bool
     revision: int
-    error_code: RoomCommandErrorCode | None = None
+    error_code: CommandErrorCode | None = None
     outbox_seq: int
 
 
@@ -502,6 +501,8 @@ class RoomActor:
         runtime: PersistedRoomRuntime | None = None,
         dm_traces: tuple[DMTraceRecord, ...] = (),
         dm_transport_traces: tuple[DMTraceRecord, ...] = (),
+        recovery_audit: tuple[PersistedRecoveryAudit, ...] = (),
+        snapshots: tuple[PersistedSnapshot, ...] = (),
     ) -> None:
         self.room_id = room_id
         self.room_code = room_code
@@ -525,6 +526,8 @@ class RoomActor:
         self.dm_trace: list[DMTraceRecord] = list(dm_traces)
         self.dm_transport_trace: list[DMTraceRecord] = list(dm_transport_traces)
         self.last_trace: DMTraceRecord | None = None
+        self._recovery_audit = recovery_audit
+        self._snapshots = snapshots
         self.seat_session_ids: dict[int, UUID] = {}
         self.recovery_epoch = runtime.recovery_epoch if runtime is not None else 0
         self._discarded_command_tombstones = (
@@ -569,6 +572,21 @@ class RoomActor:
     @property
     def published_message_ids(self) -> tuple[UUID, ...]:
         return tuple(sorted(self._published_message_ids, key=str))
+
+    def host_recovery_audit(self) -> tuple[dict[str, JsonValue], ...]:
+        return tuple(record.model_dump(mode="json") for record in self._recovery_audit)
+
+    def host_snapshots(self) -> tuple[dict[str, JsonValue], ...]:
+        return tuple(snapshot.model_dump(mode="json") for snapshot in self._snapshots)
+
+    def refresh_host_audit(self) -> None:
+        store = self._coordinator.store
+        if store is None:
+            self._recovery_audit = ()
+            self._snapshots = ()
+            return
+        self._recovery_audit = store.load_recovery_audit(self.room_id)
+        self._snapshots = store.load_snapshots(self.room_id)
 
     @staticmethod
     def _next_domain_seq_floor(state: GameState) -> int:
@@ -1299,7 +1317,7 @@ class RoomActor:
                             command_id=event.envelope.command_id,
                             accepted=False,
                             revision=self.core.state.revision,
-                            error_code="COMMAND_VOIDED_BY_REWIND",
+                            error_code=CommandErrorCode.COMMAND_VOIDED_BY_REWIND,
                             outbox_seq=self.outbox_seq,
                         )
                     )
@@ -1312,6 +1330,7 @@ class RoomActor:
                     event.envelope,
                     event.actor,
                     next_domain_seq=self.domain_seq_allocator,
+                    discarded_command_tombstones=self._discarded_command_tombstones,
                 )
                 self._commit_core_mutation(mutation)
                 result = mutation.command_result
@@ -1661,6 +1680,8 @@ class RoomRegistry:
                 runtime=runtime,
                 dm_traces=dm_traces,
                 dm_transport_traces=dm_transport_traces,
+                recovery_audit=store.load_recovery_audit(persisted.room_id),
+                snapshots=store.load_snapshots(persisted.room_id),
             )
             self.rooms[persisted.room_code] = actor
             actors_by_id[persisted.room_id] = actor
@@ -1740,6 +1761,8 @@ class RoomRegistry:
         runtime: PersistedRoomRuntime | None = None,
         dm_traces: tuple[DMTraceRecord, ...] = (),
         dm_transport_traces: tuple[DMTraceRecord, ...] = (),
+        recovery_audit: tuple[PersistedRecoveryAudit, ...] = (),
+        snapshots: tuple[PersistedSnapshot, ...] = (),
     ) -> RoomActor:
         return RoomActor(
             room_id=room_id,
@@ -1753,6 +1776,8 @@ class RoomRegistry:
             runtime=runtime,
             dm_traces=dm_traces,
             dm_transport_traces=dm_transport_traces,
+            recovery_audit=recovery_audit,
+            snapshots=snapshots,
             uuid_source=self._uuid_source,
             activity_sink=(self._persist_room_activity if self.store is not None else None),
         )

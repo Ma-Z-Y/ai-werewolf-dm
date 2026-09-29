@@ -14,12 +14,16 @@ from pydantic import BaseModel, Field, JsonValue, field_serializer, model_valida
 from pydantic_core import to_jsonable_python
 
 from werewolf_dm.application.dm_contracts import DMTraceRecord
-from werewolf_dm.domain.contracts import CommandResult, DomainEvent
+from werewolf_dm.domain.contracts import (
+    CommandDedupeKey,
+    CommandResult,
+    DomainEvent,
+    SnapshotReason,
+)
 from werewolf_dm.domain.model import GameState, StrictModel, freeze_json_mapping
 from werewolf_dm.domain.replay import event_log_digest
 
 DMTraceKind = Literal["DM_TRACE", "DM_TRANSPORT_TRACE"]
-SnapshotReason = Literal["PAUSED", "PRE_CORRECTION", "PHASE_START", "GAME_END"]
 
 
 class PersistenceError(RuntimeError):
@@ -36,12 +40,6 @@ class PersistenceConflictError(PersistenceError):
 
 class PersistenceNotFoundError(PersistenceError):
     """A requested persisted record does not exist."""
-
-
-class CommandDedupeKey(StrictModel):
-    command_id: UUID
-    actor_type: Literal["seat", "host"]
-    actor_key: str = Field(min_length=1)
 
 
 class PersistedDMTrace(StrictModel):
@@ -958,7 +956,7 @@ class SQLiteRoomStore:
             snapshot_id=_load_uuid(row["snapshot_id"], "snapshot id"),
             room_id=_load_uuid(row["room_id"], "snapshot room id"),
             revision=row["revision"],
-            reason=row["reason"],
+            reason=SnapshotReason(row["reason"]),
             state=self._load_model(GameState, row["state_json"], "snapshot state"),
             event_count=row["event_count"],
             created_at=_load_datetime(row["created_at"], "snapshot creation time"),

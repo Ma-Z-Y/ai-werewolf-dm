@@ -73,6 +73,7 @@ class HostAuditExport(StrictModel):
     state: GameState
     raw_events: tuple[DomainEvent, ...]
     dm_trace: tuple[dict[str, JsonValue], ...] = ()
+    recovery_audit: tuple[dict[str, JsonValue], ...] = ()
     snapshots: tuple[dict[str, JsonValue], ...] = ()
 
 
@@ -404,6 +405,10 @@ def project_host_audit(
     state: GameState,
     events: tuple[DomainEvent, ...],
     actor: AuthenticatedActor,
+    *,
+    dm_trace: tuple[dict[str, JsonValue], ...] = (),
+    recovery_audit: tuple[dict[str, JsonValue], ...] = (),
+    snapshots: tuple[dict[str, JsonValue], ...] = (),
 ) -> HostAuditExport:
     state = GameState.revalidate(state)
     actor = _validate_actor(actor, "HOST_AUDIT_FORBIDDEN")
@@ -415,4 +420,7 @@ def project_host_audit(
         revision=state.revision,
         state=state,
         raw_events=validated_events,
+        dm_trace=dm_trace,
+        recovery_audit=recovery_audit,
+        snapshots=snapshots,
     )

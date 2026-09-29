@@ -6,6 +6,7 @@ from uuid import NAMESPACE_URL, UUID
 
 from werewolf_dm.domain.contracts import (
     AuthenticatedActor,
+    CommandDedupeKey,
     CommandEnvelope,
     CommandErrorCode,
     CommandResult,
@@ -22,7 +23,6 @@ from werewolf_dm.domain.state_machine import (
 )
 from werewolf_dm.domain.visibility import SeatView, project_seat_view
 from werewolf_dm.infrastructure.persistence import (
-    CommandDedupeKey,
     PersistedAdmission,
     PersistedDMTrace,
     PersistedPublication,
@@ -284,6 +284,7 @@ class GameCore:
         actor: AuthenticatedActor,
         *,
         next_domain_seq: DomainSeqAllocator,
+        discarded_command_tombstones: tuple[CommandDedupeKey, ...] = (),
     ) -> CoreMutation:
         envelope = CommandEnvelope.revalidate(envelope)
         actor = AuthenticatedActor.revalidate(actor)
@@ -306,6 +307,20 @@ class GameCore:
                 cache_result=False,
             )
         dedupe_key = self._dedupe_key(envelope.command_id, actor)
+        if dedupe_key in discarded_command_tombstones:
+            return self._mutation(
+                next_state=self._state,
+                events=(),
+                result=CommandResult(
+                    command_id=envelope.command_id,
+                    accepted=False,
+                    revision=self._state.revision,
+                    event_ids=(),
+                    error_code=CommandErrorCode.COMMAND_VOIDED_BY_REWIND,
+                ),
+                dedupe_key=dedupe_key,
+                cache_result=False,
+            )
         cache_key = self._legacy_dedupe_key(dedupe_key)
         cached = self.command_dedupe_cache.get(cache_key)
         if cached is not None:
@@ -431,12 +446,15 @@ class GameCore:
         self,
         envelope: CommandEnvelope,
         actor: AuthenticatedActor,
+        *,
+        discarded_command_tombstones: tuple[CommandDedupeKey, ...] = (),
     ) -> CommandResult:
         allocator = DomainSeqAllocator(self._next_domain_seq(self._state))
         mutation = self.stage_submit(
             envelope,
             actor,
             next_domain_seq=allocator,
+            discarded_command_tombstones=discarded_command_tombstones,
         )
         for reservation in mutation.seq_reservations:
             allocator.commit(reservation)

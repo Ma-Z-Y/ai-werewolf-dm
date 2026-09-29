@@ -37,6 +37,7 @@ class ErrorCode(StrEnum):
     WITCH_SELF_RESCUE_FORBIDDEN = CommandErrorCode.WITCH_SELF_RESCUE_FORBIDDEN.value
     GAME_ENDED = CommandErrorCode.GAME_ENDED.value
     HOST_RECOVERY_NOT_IN_S1 = CommandErrorCode.HOST_RECOVERY_NOT_IN_S1.value
+    COMMAND_VOIDED_BY_REWIND = CommandErrorCode.COMMAND_VOIDED_BY_REWIND.value
     RATE_LIMITED = "RATE_LIMITED"
     CONNECTION_LAG = "CONNECTION_LAG"
     INTERNAL_ERROR = "INTERNAL_ERROR"
@@ -62,6 +63,7 @@ SAFE_MESSAGES: dict[ErrorCode, str] = {
     ErrorCode.WITCH_SELF_RESCUE_FORBIDDEN: "女巫不能自救",
     ErrorCode.GAME_ENDED: "游戏已结束",
     ErrorCode.HOST_RECOVERY_NOT_IN_S1: "该功能尚未开放",
+    ErrorCode.COMMAND_VOIDED_BY_REWIND: "该操作已因回退失效",
     ErrorCode.RATE_LIMITED: "请求过于频繁",
     ErrorCode.CONNECTION_LAG: "连接已断开",
     ErrorCode.INTERNAL_ERROR: "服务器内部错误",
