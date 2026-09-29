@@ -276,6 +276,11 @@ describe("host recovery panel", () => {
     );
     expect(screen.getByLabelText("查验天数")).toHaveValue(1);
     expect(screen.getByLabelText("查验天数")).toHaveAttribute("min", "1");
+    await user.clear(screen.getByLabelText("查验天数"));
+    await user.type(screen.getByLabelText("查验天数"), "0");
+    expect(
+      screen.getByRole("button", { name: "提交主持人纠错" }),
+    ).toBeDisabled();
   });
 
   it("disables recovery submission while resume is pending", async () => {

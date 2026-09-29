@@ -117,6 +117,35 @@ def _host_correction_event(core, *, revision: int, event_ordinal: int) -> Domain
     )
 
 
+def _role_correction_event(
+    core,
+    *,
+    revision: int,
+    event_ordinal: int,
+    before: list[dict[str, object]],
+    after: list[dict[str, object]],
+) -> DomainEvent:
+    return build_event(
+        cause_id=_HOST_COMMAND_ID,
+        event_ordinal=event_ordinal,
+        room_id=core.state.room_id,
+        revision=revision,
+        event_type=EventType.HOST_CORRECTION_APPLIED,
+        visibility=HostVisibility(),
+        payload=HostCorrectionAudit(
+            audit_kind="HOST_CORRECTION_APPLIED",
+            status="APPLIED",
+            command_id=_HOST_COMMAND_ID,
+            patch_type="SET_ROLE",
+            before_revision=revision - 1,
+            after_revision=revision,
+            diff={"players": {"before": before, "after": after}},
+            reason="host correction",
+        ),
+        created_at=core.clock(),
+    )
+
+
 def test_vis_001_villager_public_view_has_no_role_or_secret_fields(core_at_night):
     public = project_public_view(core_at_night.state)
     payload = public.model_dump(mode="json")
@@ -249,7 +278,7 @@ def test_player_replay_never_includes_host_recovery_audit(core, actor, host):
             command_id=_HOST_COMMAND_ID,
             snapshot_id=_HOST_SNAPSHOT_ID,
             from_revision=2,
-            to_revision=3,
+            to_revision=0,
             restored_state_digest="b" * 64,
         ),
         created_at=core.clock(),
@@ -269,6 +298,121 @@ def test_player_replay_never_includes_host_recovery_audit(core, actor, host):
         "HOST_REWIND_APPLIED",
     ):
         assert event_type not in serialized
+
+
+def test_rewind_restores_projection_role_timeline(core_at_night, actor, host):
+    core = core_at_night
+    base_events = tuple(core.events)
+    base_revision = core.state.revision
+    roles = [(player.seat_id, player.role) for player in core.state.players]
+    first = next(
+        (seat_id, role)
+        for index, (seat_id, role) in enumerate(roles)
+        for other_seat_id, other_role in roles[index + 1 :]
+        if role is not None and other_role is not None and role is not other_role
+        for other in [(other_seat_id, other_role)]
+    )
+    first_seat_id, first_role = first
+    second_seat_id, second_role = next(
+        (seat_id, role)
+        for seat_id, role in roles
+        if seat_id != first_seat_id and role is not None and role is not first_role
+    )
+    before = [{"seat_id": seat_id, "role": role.value} for seat_id, role in roles]
+    after = [
+        {
+            "seat_id": seat_id,
+            "role": (
+                second_role.value
+                if seat_id == first_seat_id
+                else first_role.value
+                if seat_id == second_seat_id
+                else role.value
+            ),
+        }
+        for seat_id, role in roles
+    ]
+    correction = _role_correction_event(
+        core,
+        revision=base_revision + 1,
+        event_ordinal=len(base_events) + 1,
+        before=before,
+        after=after,
+    )
+    rewind = build_event(
+        cause_id=_HOST_COMMAND_ID,
+        event_ordinal=len(base_events) + 2,
+        room_id=core.state.room_id,
+        revision=base_revision + 2,
+        event_type=EventType.HOST_REWIND_APPLIED,
+        visibility=HostVisibility(),
+        payload=HostRewindAudit(
+            command_id=_HOST_COMMAND_ID,
+            snapshot_id=_HOST_SNAPSHOT_ID,
+            from_revision=base_revision + 1,
+            to_revision=base_revision,
+            restored_state_digest="b" * 64,
+        ),
+        created_at=core.clock(),
+    )
+    events = (*base_events, correction, rewind)
+    state = core.state.model_copy(
+        update={
+            "revision": rewind.revision,
+            "event_count": len(events),
+            "event_log_digest": event_log_digest(events),
+        }
+    )
+
+    assert project_host_audit(state, events, host()).raw_events == events
+    assert project_player_replay(state, events, actor(1)).events
+
+
+def test_non_role_player_diff_does_not_break_projection(core, host):
+    event = _role_correction_event(
+        core,
+        revision=1,
+        event_ordinal=1,
+        before=[{"seat_id": 1, "role": None}],
+        after=[{"seat_id": 1, "role": None}],
+    )
+    state = _state_with_events(core, event)
+
+    assert project_host_audit(state, (event,), host()).raw_events == (event,)
+
+
+def test_rewind_to_zero_cannot_reseed_forged_role_timeline(core_at_night, host):
+    rewind = build_event(
+        cause_id=_HOST_COMMAND_ID,
+        event_ordinal=1,
+        room_id=core_at_night.state.room_id,
+        revision=1,
+        event_type=EventType.HOST_REWIND_APPLIED,
+        visibility=HostVisibility(),
+        payload=HostRewindAudit(
+            command_id=_HOST_COMMAND_ID,
+            snapshot_id=_HOST_SNAPSHOT_ID,
+            from_revision=0,
+            to_revision=0,
+            restored_state_digest="c" * 64,
+        ),
+        created_at=core_at_night.clock(),
+    )
+    correction = _role_correction_event(
+        core_at_night,
+        revision=2,
+        event_ordinal=2,
+        before=[],
+        after=[
+            {"seat_id": player.seat_id, "role": player.role.value}
+            for player in core_at_night.state.players
+            if player.role is not None
+        ],
+    )
+    state = _state_with_events(core_at_night, rewind, correction)
+
+    with pytest.raises(ProjectionAccessError, match="PROJECTION_EVENT_MISMATCH"):
+        project_host_audit(state, (rewind, correction), host())
 
 
 def test_rejected_audit_does_not_change_state_hash_or_revision(core):

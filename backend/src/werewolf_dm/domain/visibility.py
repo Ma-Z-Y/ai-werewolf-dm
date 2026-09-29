@@ -153,21 +153,25 @@ def _validate_event_log(
     if event_log_digest(tuple(validated_events)) != state.event_log_digest:
         raise ProjectionAccessError("PROJECTION_EVENT_MISMATCH")
     roles_by_seat: dict[int, Role] = {}
+    role_history: dict[int, dict[int, Role]] = {0: {}}
     original_roles = {
         assignment.seat_id: assignment.role for assignment in assign_roles(state.seed)
     }
     for event in validated_events:
         if event.event_type is EventType.HOST_CORRECTION_APPLIED:
             _apply_role_correction(roles_by_seat, event)
+        elif event.event_type is EventType.HOST_REWIND_APPLIED:
+            _rewind_role_timeline(roles_by_seat, role_history, event)
         _validate_state_event_binding(
             event,
             roles_by_seat,
             original_roles,
         )
+        role_history[event.revision] = dict(roles_by_seat)
     current_roles = {
         player.seat_id: player.role for player in state.players if player.role is not None
     }
-    if roles_by_seat and roles_by_seat != current_roles:
+    if roles_by_seat != current_roles:
         raise ProjectionAccessError("PROJECTION_EVENT_MISMATCH")
     return tuple(validated_events)
 
@@ -181,7 +185,11 @@ def _role_payload(value: object) -> dict[int, Role]:
             raise ProjectionAccessError("PROJECTION_EVENT_MISMATCH")
         seat_id = item.get("seat_id")
         role_value = item.get("role")
-        if type(seat_id) is not int or not isinstance(role_value, str):
+        if type(seat_id) is not int:
+            raise ProjectionAccessError("PROJECTION_EVENT_MISMATCH")
+        if role_value is None:
+            continue
+        if not isinstance(role_value, str):
             raise ProjectionAccessError("PROJECTION_EVENT_MISMATCH")
         try:
             role = Role(role_value)
@@ -208,10 +216,29 @@ def _apply_role_correction(
         return
     before = _role_payload(players_diff.get("before"))
     after = _role_payload(players_diff.get("after"))
-    if roles_by_seat and before != roles_by_seat:
+    if not before:
+        if after:
+            raise ProjectionAccessError("PROJECTION_EVENT_MISMATCH")
+        return
+    if before != roles_by_seat:
         raise ProjectionAccessError("PROJECTION_EVENT_MISMATCH")
     roles_by_seat.clear()
     roles_by_seat.update(after)
+
+
+def _rewind_role_timeline(
+    roles_by_seat: dict[int, Role],
+    role_history: Mapping[int, dict[int, Role]],
+    event: DomainEvent,
+) -> None:
+    to_revision = event.fact_payload.get("to_revision")
+    if type(to_revision) is not int or to_revision < 0 or to_revision >= event.revision:
+        raise ProjectionAccessError("PROJECTION_EVENT_MISMATCH")
+    target = role_history.get(to_revision)
+    if target is None:
+        raise ProjectionAccessError("PROJECTION_EVENT_MISMATCH")
+    roles_by_seat.clear()
+    roles_by_seat.update(target)
 
 
 def _validate_state_event_binding(

@@ -136,7 +136,7 @@ export function HostRecoveryPanel({
       }
       case "SET_SEER_CHECKS": {
         const day = Number(checkDay);
-        if (!Number.isInteger(day) || day < 0) return null;
+        if (!Number.isInteger(day) || day < 1) return null;
         return {
           patch_type: "SET_SEER_CHECKS",
           seer_seat_id: parseSeat(seerSeatId),
