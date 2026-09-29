@@ -16,7 +16,12 @@ from werewolf_dm.application.rooms import (
     TokenRecord,
     can_subscribe,
 )
-from werewolf_dm.domain.contracts import AuthenticatedActor
+from werewolf_dm.domain.contracts import (
+    AuthenticatedActor,
+    HostForceTemplateCommand,
+    HostPatchCommand,
+    HostRewindToSnapshotCommand,
+)
 from werewolf_dm.domain.model import StrictModel
 from werewolf_dm.interfaces.http_ws.auth import resolve_socket_token
 from werewolf_dm.interfaces.http_ws.errors import (
@@ -38,6 +43,8 @@ AUTH_TIMEOUT_SECONDS = 5.0
 IDLE_TIMEOUT_SECONDS = 60.0
 
 router = APIRouter()
+
+RecoveryCommand = HostPatchCommand | HostRewindToSnapshotCommand | HostForceTemplateCommand
 
 
 class SeatSubscribeMessage(StrictModel):
@@ -242,6 +249,18 @@ async def message_loop(
         if command_message is not None:
             sink.record_client_activity()
             if actor is not None and actor.actor_type == "display":
+                sink.offer(
+                    ErrorMessage(
+                        code=ErrorCode.ACTOR_NOT_AUTHORIZED,
+                        message="操作未授权",
+                        request_id=uuid4(),
+                    )
+                )
+                continue
+            if actor is None and isinstance(
+                command_message.command.payload,
+                RecoveryCommand,
+            ):
                 sink.offer(
                     ErrorMessage(
                         code=ErrorCode.ACTOR_NOT_AUTHORIZED,

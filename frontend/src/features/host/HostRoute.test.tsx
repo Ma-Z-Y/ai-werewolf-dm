@@ -252,14 +252,17 @@ describe("host control console", () => {
     });
   });
 
-  it("explains that correction is unavailable without fake controls", async () => {
+  it("tells the host to pause before using correction", async () => {
     writeHostSessionForRoom();
     renderHost();
     await openHostSocket();
 
     expect(
-      screen.getByText("主持人纠错尚未实现，请结束并重开一局。"),
+      screen.getByText("请先暂停游戏，再进行主持人纠错"),
     ).toBeVisible();
+    expect(
+      screen.queryByText("主持人纠错尚未实现，请结束并重开一局。"),
+    ).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: /修正|回退/ }),
     ).not.toBeInTheDocument();
