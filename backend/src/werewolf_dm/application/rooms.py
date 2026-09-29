@@ -37,14 +37,20 @@ from werewolf_dm.application.dm_intents import (
 )
 from werewolf_dm.application.dm_service import TemplateDMService, TemplateRenderError
 from werewolf_dm.application.dm_templates import TemplateRegistry
+from werewolf_dm.application.host_recovery import HostRecoveryService, RecoveryCommit
 from werewolf_dm.domain.contracts import (
     EVENT_PAYLOAD_MODELS,
     ActorType,
     AuthenticatedActor,
     CommandEnvelope,
     CommandErrorCode,
+    CommandResult,
     DomainEvent,
+    HostForceTemplateCommand,
+    HostPatchCommand,
+    HostRewindToSnapshotCommand,
     PhaseChangedPayload,
+    SnapshotReason,
 )
 from werewolf_dm.domain.model import GameState, OutboxItem, StrictModel
 from werewolf_dm.domain.visibility import (
@@ -512,6 +518,11 @@ class RoomActor:
         self.core = core or GameCore(room_id=room_id, seed=seed, clock=clock)
         self.dm_service = dm_service or TemplateDMService(registry=TemplateRegistry())
         self._coordinator = coordinator or PersistenceCoordinator(None)
+        self._recovery_service = (
+            HostRecoveryService(self._coordinator.store)
+            if self._coordinator.store is not None
+            else None
+        )
         self.events: asyncio.Queue[RoomEvent] = asyncio.Queue()
         self.subscribers: dict[UUID, RoomSubscriber] = {}
         self.outbox_seq = runtime.outbox_seq if runtime is not None else 0
@@ -1076,12 +1087,14 @@ class RoomActor:
         )
         if not must_persist:
             return
+        snapshot = self._snapshot_for_mutation(mutation)
         try:
             self._coordinator.commit_core_mutation(
                 self.room_id,
                 mutation,
                 self._runtime_snapshot(),
                 (),
+                snapshot=snapshot,
             )
         except BaseException:
             for reservation in reversed(mutation.seq_reservations):
@@ -1090,6 +1103,38 @@ class RoomActor:
         self.core.commit(mutation)
         for reservation in mutation.seq_reservations:
             self.domain_seq_allocator.commit(reservation)
+        if snapshot is not None:
+            self._snapshots = (*self._snapshots, snapshot)
+
+    def _snapshot_for_mutation(
+        self,
+        mutation: CoreMutation,
+    ) -> PersistedSnapshot | None:
+        if self._coordinator.store is None or not mutation.command_result.accepted:
+            return None
+        current = self.core.state
+        next_state = mutation.next_state
+        reason: SnapshotReason | None = None
+        if current.winner is None and next_state.winner is not None:
+            reason = SnapshotReason.GAME_END
+        elif current.phase is not next_state.phase:
+            reason = SnapshotReason.PHASE_START
+        elif not current.paused and next_state.paused:
+            reason = SnapshotReason.PAUSED
+        if reason is None:
+            return None
+        return PersistedSnapshot(
+            snapshot_id=uuid5(
+                NAMESPACE_URL,
+                f"{self.room_id}:{next_state.revision}:{reason.value}",
+            ),
+            room_id=self.room_id,
+            revision=next_state.revision,
+            reason=reason,
+            state=next_state,
+            event_count=next_state.event_count,
+            created_at=self.clock(),
+        )
 
     def _commit_runtime_update(
         self,
@@ -1326,17 +1371,38 @@ class RoomActor:
                 continue
             if isinstance(event, SubmitCommandEvent):
                 revision_before = self.core.state.revision
-                mutation = self.core.stage_submit(
-                    event.envelope,
-                    event.actor,
-                    next_domain_seq=self.domain_seq_allocator,
-                    discarded_command_tombstones=self._discarded_command_tombstones,
-                )
-                self._commit_core_mutation(mutation)
-                result = mutation.command_result
+                if isinstance(
+                    event.envelope.payload,
+                    (
+                        HostPatchCommand,
+                        HostRewindToSnapshotCommand,
+                        HostForceTemplateCommand,
+                    ),
+                ):
+                    result = self._submit_recovery_command(
+                        event.envelope,
+                        event.actor,
+                    )
+                else:
+                    mutation = self.core.stage_submit(
+                        event.envelope,
+                        event.actor,
+                        next_domain_seq=self.domain_seq_allocator,
+                        discarded_command_tombstones=self._discarded_command_tombstones,
+                    )
+                    self._commit_core_mutation(mutation)
+                    result = mutation.command_result
                 if result.accepted and result.revision > revision_before:
                     self.touch()
-                    await self.consume_announcements()
+                    if not isinstance(
+                        event.envelope.payload,
+                        (
+                            HostPatchCommand,
+                            HostRewindToSnapshotCommand,
+                            HostForceTemplateCommand,
+                        ),
+                    ):
+                        await self.consume_announcements()
                     self._publish_updates()
                 if not event.result.done():
                     event.result.set_result(
@@ -1430,6 +1496,99 @@ class RoomActor:
                     self.seat_session_ids.pop(detached_subscriber.seat_id, None)
                 continue
             raise RuntimeError("UNHANDLED_ROOM_EVENT")
+
+    def _submit_recovery_command(
+        self,
+        envelope: CommandEnvelope,
+        actor: AuthenticatedActor,
+    ) -> CommandResult:
+        if envelope.room_id != self.room_id:
+            return CommandResult(
+                command_id=envelope.command_id,
+                accepted=False,
+                revision=self.core.state.revision,
+                event_ids=(),
+                error_code=CommandErrorCode.ACTOR_NOT_AUTHORIZED,
+            )
+        service = self._recovery_service
+        if service is None:
+            return CommandResult(
+                command_id=envelope.command_id,
+                accepted=False,
+                revision=self.core.state.revision,
+                event_ids=(),
+                error_code=CommandErrorCode.HOST_RECOVERY_NOT_IN_S1,
+            )
+        runtime = self._runtime_snapshot()
+        payload = envelope.payload
+        if isinstance(payload, HostPatchCommand):
+            commit = service.stage_patch(
+                room_id=envelope.room_id,
+                core=self.core,
+                runtime=runtime,
+                command=payload,
+                actor=actor,
+                now=self.clock(),
+                command_id=envelope.command_id,
+                expected_revision=envelope.expected_revision,
+            )
+        elif isinstance(payload, HostRewindToSnapshotCommand):
+            commit = service.stage_rewind(
+                core=self.core,
+                runtime=runtime,
+                command=payload,
+                actor=actor,
+                now=self.clock(),
+                command_id=envelope.command_id,
+                expected_revision=envelope.expected_revision,
+            )
+        else:
+            assert isinstance(payload, HostForceTemplateCommand)
+            commit = service.stage_force_template(
+                core=self.core,
+                runtime=runtime,
+                command=payload,
+                actor=actor,
+                now=self.clock(),
+                command_id=envelope.command_id,
+                expected_revision=envelope.expected_revision,
+            )
+        store = self._coordinator.store
+        assert store is not None
+        with store.transaction() as connection:
+            service.persist_commit(connection, self.room_id, commit)
+        self._apply_recovery_commit(commit)
+        return commit.command_result
+
+    def _apply_recovery_commit(self, commit: RecoveryCommit) -> None:
+        store = self._coordinator.store
+        assert store is not None
+        previous_epoch = self.recovery_epoch
+        if commit.events:
+            state, events = store.load_core(self.room_id)
+            self.core = GameCore.restore(
+                room_id=self.room_id,
+                seed=state.seed,
+                clock=self.clock,
+                state=state,
+                events=events,
+                command_results=store.load_command_results(self.room_id),
+            )
+            runtime = store.load_room_runtime(self.room_id)
+            self._apply_runtime(runtime)
+            self.domain_seq_allocator = DomainSeqAllocator(
+                max(
+                    runtime.next_domain_seq,
+                    self._next_domain_seq_floor(self.core.state),
+                )
+            )
+            if runtime.recovery_epoch > previous_epoch:
+                self.published_messages.clear()
+                self.published_kinds.clear()
+                self._announcement_candidates.clear()
+                self._announcement_slots.clear()
+        self._snapshots = store.load_snapshots(self.room_id)
+        self._recovery_audit = store.load_recovery_audit(self.room_id)
 
     @staticmethod
     def _subscriber_identity(

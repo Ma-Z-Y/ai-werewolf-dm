@@ -498,6 +498,24 @@ def test_recovery_audit_is_append_only(tmp_path: Path) -> None:
         store.append_recovery_audit(sample_audit())
 
 
+def test_recovery_transaction_rolls_back_snapshot_and_audit_on_late_failure(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteRoomStore(tmp_path / "rooms.sqlite3")
+    store.migrate()
+    store.save_room(sample_persisted_room())
+    store.save_core(ROOM_ID, sample_state(), sample_events())
+
+    with pytest.raises(PersistenceConflictError), store.transaction():
+        store.save_snapshot(sample_snapshot())
+        store.append_recovery_audit(sample_audit())
+        store.append_recovery_audit(sample_audit())
+
+    assert store.load_snapshots(ROOM_ID) == ()
+    assert store.load_recovery_audit(ROOM_ID) == ()
+    assert store.load_core(ROOM_ID)[0] == sample_state()
+
+
 def test_load_recovery_audit_rejects_malformed_diff_json(tmp_path: Path) -> None:
     database_path = tmp_path / "rooms.sqlite3"
     store = SQLiteRoomStore(database_path)
