@@ -5,7 +5,19 @@
 
 ## Unreleased
 
-_暂无变更。_
+### Added
+
+- P1 主持人恢复与最小持久化：SQLite 原子恢复事务、精确快照回退、
+  force-template、六类主持人补丁、host-only WebSocket/UI、单一
+  host-only `/audit`、固定安全错误映射，以及 phase-start/game-end/
+  pre-correction/paused 快照恢复。
+- `REC-006` 至 `REC-009`、`REC-013`、`E2E-007` 和 `VIS-013` 的本地
+  回归证据：同一临时 SQLite 跨两个 app 进程，原 host/seat/display
+  凭据重连；raw events、recovery audit 和快照集合恢复且无重复；seat
+  replay、display/public 不暴露 snapshot、diff、raw events 或 token。
+
+该变更当前仅存在本地分支，等待用户验收；尚未 push、创建 PR、merge、
+tag 或 release。
 
 ## 0.3.0 - 2026-09-28
 

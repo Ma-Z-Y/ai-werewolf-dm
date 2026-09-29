@@ -30,15 +30,19 @@
 
 ## 下一步
 
-- [ ] P1 上线前补强：评审
+- [ ] P1 上线前补强：设计
   `docs/specs/2026-09-28-host-recovery-persistence-design.md` 已冻结；
-  TDD implementation plan 已通过第三轮 fresh-context 复核，
-  `projectmem #0243` 已关闭，下一步从 Task 1 开始实现。
+  Task 1-8 已在本分支完成本地实现和验证，包括恢复事务、rewind、
+  force-template、host-only WS/UI、单一 `/audit`、跨 app 进程 restart
+  recovery 和 seat/display/public privacy 负例。该任务仍需用户验收后才能
+  标记完成；当前未 push、创建 PR、merge、tag 或 release。
 - [ ] 后续版本化设计 provider/LLM 重入。
 
 每项任务只有在实现、确定性测试、独立复核和用户验收都完成后才会标记为
-完成。正式版本只会在对应阶段的验收出口通过后发布。当前 S4 本地与 CI
-基线为 backend `640 passed, 10 skipped`，latency marker 为
-`8 passed, 2 skipped`；前端单元/组件测试为 `166 passed`，Playwright
-浏览器测试为 `14 passed`。CI 与根交付门禁同时覆盖后端、前端和隔离的
+完成。正式版本只会在对应阶段的验收出口通过后发布。当前本地 P1 验证
+结果为 backend `761 passed, 10 skipped`、latency `8 passed, 2 skipped`、
+前端 Vitest `173 passed`、Playwright `15 passed`，ruff、format、
+strict mypy、lint、typecheck 和 build 均通过。根 `verify-delivery.ps1`
+的源码/状态新鲜度检查需在最终 handoff 更新后重跑。S4 的历史本地与 CI
+基线仍作为已验收参考。CI 与根交付门禁同时覆盖后端、前端和隔离的
 latency job。

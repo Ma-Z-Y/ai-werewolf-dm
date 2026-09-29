@@ -23,6 +23,12 @@
   outbox 生产
   `SEAT_PROMPT`，浏览器隔离证据直接来自真实生产消息，不再需要
   E2E-only injection。Provider/LLM 仍保持 deferred。
+- P1 主持人恢复与最小持久化：Task 1-8 已在本分支本地实现和验证。恢复
+  事务、精确快照回退、force-template、host-only WebSocket/UI 和单一
+  `/audit` 已接通；Task 8 使用跨两个 app 进程共享的临时 SQLite，证明
+  host/seat/display 原凭据重连、事件与 recovery audit 恢复、快照集合不
+  重复，以及 seat replay/display/public privacy 负例。该工作仍仅限本地，
+  等待用户验收；尚未 push、创建 PR、merge、tag 或 release。
 
 准确状态和下一步以
 [`docs/specs/README.md`](docs/specs/README.md) 与

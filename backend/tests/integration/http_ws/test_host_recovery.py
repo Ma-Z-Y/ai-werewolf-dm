@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections import Counter
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import pytest
 from fastapi.testclient import TestClient
@@ -11,13 +12,20 @@ from werewolf_dm.application.core import FrozenClock
 from werewolf_dm.application.rooms import RoomRegistry, SequenceTokenSource
 from werewolf_dm.domain.contracts import (
     CommandEnvelope,
+    Faction,
     HostCommand,
     HostPatchCommand,
     HostPauseCommand,
     HostRewindToSnapshotCommand,
+    Phase,
+    SetPhasePatch,
     SetPotionPatch,
+    SnapshotReason,
 )
-from werewolf_dm.infrastructure.persistence import SQLiteRoomStore
+from werewolf_dm.infrastructure.persistence import (
+    PersistedSnapshot,
+    SQLiteRoomStore,
+)
 from werewolf_dm.interfaces.http_ws.app import create_app
 from werewolf_dm.interfaces.http_ws.runtime import ConnectionSink
 from werewolf_dm.interfaces.http_ws.ws import message_loop
@@ -111,10 +119,12 @@ def _command_frame(
     }
 
 
-def _connect(socket, token: str) -> None:
+def _connect(socket, token: str) -> dict[str, object]:
     assert socket.receive_json() == {"type": "auth.required"}
     socket.send_json({"type": "auth", "token": token, "last_seq": 0})
-    assert socket.receive_json()["type"] == "session.ready"
+    ready = socket.receive_json()
+    assert ready["type"] == "session.ready"
+    return ready
 
 
 def _receive_ack(socket) -> tuple[list[dict[str, object]], dict[str, object]]:
@@ -440,3 +450,238 @@ def test_recovery_audit_is_host_only_and_includes_persisted_records(
     assert seat_response.status_code == 403
     assert "recovery_audit" not in seat_response.text
     assert "snapshot" not in seat_response.text
+
+
+def test_restart_restores_room_state_tokens_events_and_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prove REC-006, REC-007, REC-008, REC-009, REC-013, and E2E-007.
+
+    The same temporary SQLite path crosses two production app lifecycles.
+    SnapshotReason.PHASE_START and SnapshotReason.GAME_END records are
+    restored without duplication, while raw events and rejected/applied
+    recovery audits remain intact.
+    """
+
+    database_path = tmp_path / "restart-recovery.sqlite3"
+    monkeypatch.setenv("WEREWOLF_DM_DB_PATH", str(database_path))
+
+    with TestClient(create_app(), raise_server_exceptions=False) as first:
+        registry = first.app.state.room_registry
+        assert isinstance(registry, RoomRegistry)
+        store = registry.store
+        assert isinstance(store, SQLiteRoomStore)
+
+        created = first.post(
+            "/rooms",
+            json={"display_name": "Host"},
+        ).json()
+        joined = first.post(
+            f"/rooms/{created['room_code']}/join",
+            json={"display_name": "Alice"},
+        ).json()
+        pairing = first.post(
+            f"/rooms/{created['room_code']}/display-pairings",
+            headers=_authorization(created["host_token"]),
+        ).json()
+        display = first.post(
+            f"/rooms/{created['room_code']}/display-sessions",
+            json={"pairing_code": pairing["pairing_code"]},
+        ).json()
+
+        with first.websocket_connect("/ws") as host_socket:
+            _connect(host_socket, created["host_token"])
+            host_socket.send_json(
+                _command_frame(
+                    room_id=UUID(created["room_id"]),
+                    payload=HostPatchCommand(patch=SetPhasePatch(phase=Phase.DAY_VOTE)),
+                    expected_revision=0,
+                )
+            )
+            _, rejected = _receive_ack(host_socket)
+            assert rejected["accepted"] is False
+            assert rejected["error_code"] == "ILLEGAL_PHASE"
+            assert rejected["revision"] == 0
+
+            host_socket.send_json(
+                _command_frame(
+                    room_id=UUID(created["room_id"]),
+                    payload=HostPauseCommand(reason="restart proof"),
+                    expected_revision=0,
+                )
+            )
+            _, pause_ack = _receive_ack(host_socket)
+            assert pause_ack["accepted"] is True
+
+            host_socket.send_json(
+                _command_frame(
+                    room_id=UUID(created["room_id"]),
+                    payload=HostPatchCommand(
+                        patch=SetPotionPatch(
+                            antidote_available=False,
+                            poison_available=True,
+                        )
+                    ),
+                    expected_revision=pause_ack["revision"],
+                )
+            )
+            _, patch_ack = _receive_ack(host_socket)
+            assert patch_ack["accepted"] is True
+
+            snapshots_response = first.get(
+                f"/rooms/{created['room_code']}/audit?include=snapshots",
+                headers=_authorization(created["host_token"]),
+            )
+            assert snapshots_response.status_code == 200
+            pre_correction = max(
+                (
+                    item
+                    for item in snapshots_response.json()["snapshots"]
+                    if item["reason"] == SnapshotReason.PRE_CORRECTION.value
+                ),
+                key=lambda item: item["revision"],
+            )
+            host_socket.send_json(
+                _command_frame(
+                    room_id=UUID(created["room_id"]),
+                    payload=HostRewindToSnapshotCommand(
+                        snapshot_id=UUID(pre_correction["snapshot_id"])
+                    ),
+                    expected_revision=patch_ack["revision"],
+                )
+            )
+            _, rewind_ack = _receive_ack(host_socket)
+            assert rewind_ack["accepted"] is True
+
+        probe = SQLiteRoomStore(database_path)
+        state, events = probe.load_core(UUID(created["room_id"]))
+        game_end_state = state.model_copy(update={"phase": Phase.GAME_END, "winner": Faction.GOOD})
+        seeded = (
+            PersistedSnapshot(
+                snapshot_id=uuid5(
+                    NAMESPACE_URL,
+                    f"{created['room_id']}:{state.revision}:phase-start-proof",
+                ),
+                room_id=state.room_id,
+                revision=state.revision,
+                reason=SnapshotReason.PHASE_START,
+                state=state,
+                event_count=state.event_count,
+                created_at=_START,
+            ),
+            PersistedSnapshot(
+                snapshot_id=uuid5(
+                    NAMESPACE_URL,
+                    f"{created['room_id']}:{state.revision}:game-end-proof",
+                ),
+                room_id=state.room_id,
+                revision=state.revision,
+                reason=SnapshotReason.GAME_END,
+                state=game_end_state,
+                event_count=game_end_state.event_count,
+                created_at=_START,
+            ),
+        )
+        with probe.transaction():
+            for snapshot in seeded:
+                probe.save_snapshot(snapshot)
+
+        expected_snapshots = probe.load_snapshots(UUID(created["room_id"]))
+        expected_events = tuple(event.model_dump(mode="json") for event in events)
+        expected_audit = probe.load_recovery_audit(UUID(created["room_id"]))
+        expected_revision = state.revision
+        expected_snapshot_ids = {snapshot.snapshot_id for snapshot in expected_snapshots}
+        assert len(expected_snapshot_ids) == len(expected_snapshots)
+        assert (
+            Counter(snapshot.reason for snapshot in expected_snapshots)[SnapshotReason.PHASE_START]
+            == 1
+        )
+        assert (
+            Counter(snapshot.reason for snapshot in expected_snapshots)[SnapshotReason.GAME_END]
+            == 1
+        )
+        assert any(record.status == "REJECTED" for record in expected_audit)
+        assert any(
+            record.status == "APPLIED" and record.patch_type == "HOST_REWIND_TO_SNAPSHOT"
+            for record in expected_audit
+        )
+        probe.close()
+
+    with TestClient(create_app(), raise_server_exceptions=False) as second:
+        restored = second.app.state.room_registry
+        assert isinstance(restored, RoomRegistry)
+        restored_store = restored.store
+        assert isinstance(restored_store, SQLiteRoomStore)
+        probe = SQLiteRoomStore(database_path)
+        restored_snapshots = probe.load_snapshots(UUID(created["room_id"]))
+        assert len(restored_snapshots) == len(expected_snapshots)
+        assert {snapshot.snapshot_id for snapshot in restored_snapshots} == expected_snapshot_ids
+        assert len({snapshot.snapshot_id for snapshot in restored_snapshots}) == len(
+            restored_snapshots
+        )
+        assert Counter(snapshot.reason for snapshot in restored_snapshots) == Counter(
+            snapshot.reason for snapshot in expected_snapshots
+        )
+
+        with second.websocket_connect("/ws") as host_socket:
+            ready = _connect(host_socket, created["host_token"])
+            assert ready["snapshot"]["room_id"] == created["room_id"]
+            assert ready["snapshot"]["revision"] == expected_revision
+            assert ready["snapshot"]["host_control"]["paused"] is True
+
+            with second.websocket_connect("/ws") as seat_socket:
+                seat_ready = _connect(seat_socket, joined["seat_token"])
+                assert seat_ready["snapshot"]["room_id"] == created["room_id"]
+                assert seat_ready["snapshot"]["revision"] == expected_revision
+
+                with second.websocket_connect("/ws") as display_socket:
+                    display_ready = _connect(
+                        display_socket,
+                        display["display_token"],
+                    )
+                    assert display_ready["snapshot"]["room_id"] == created["room_id"]
+                    assert display_ready["snapshot"]["revision"] == expected_revision
+
+        audit_response = second.get(
+            f"/rooms/{created['room_code']}/audit?include=recovery_audit,snapshots",
+            headers=_authorization(created["host_token"]),
+        )
+        assert audit_response.status_code == 200
+        audit = audit_response.json()
+        assert tuple(event["event_id"] for event in audit["raw_events"]) == tuple(
+            event["event_id"] for event in expected_events
+        )
+        assert {snapshot["snapshot_id"] for snapshot in audit["snapshots"]} == {
+            str(snapshot_id) for snapshot_id in expected_snapshot_ids
+        }
+        assert len(audit["snapshots"]) == len(expected_snapshots)
+        assert {record["record_id"] for record in audit["recovery_audit"]} == {
+            str(record.record_id) for record in expected_audit
+        }
+
+        replay_response = second.get(
+            f"/rooms/{created['room_code']}/replay?include=snapshots,recovery_audit",
+            headers=_authorization(joined["seat_token"]),
+        )
+        assert replay_response.status_code == 200
+        replay = replay_response.json()
+        for forbidden in (
+            "snapshots",
+            "recovery_audit",
+            "raw_events",
+            "state",
+            "dm_trace",
+            "token",
+        ):
+            assert forbidden not in replay
+        assert "HOST_CORRECTION_APPLIED" not in replay_response.text
+        assert "HOST_COMPENSATION_APPLIED" not in replay_response.text
+        seat_audit = second.get(
+            f"/rooms/{created['room_code']}/audit?include=recovery_audit,snapshots",
+            headers=_authorization(joined["seat_token"]),
+        )
+        assert seat_audit.status_code == 403
+        assert "snapshot" not in seat_audit.text
+        assert "recovery_audit" not in seat_audit.text
+        probe.close()
