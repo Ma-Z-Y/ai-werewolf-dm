@@ -1659,10 +1659,14 @@ class RoomRegistry:
                 store.delete_room(persisted.room_id)
                 continue
             try:
-                core, runtime, dm_traces, dm_transport_traces = self._restore_room(
-                    store,
-                    persisted,
-                )
+                (
+                    core,
+                    runtime,
+                    dm_traces,
+                    dm_transport_traces,
+                    recovery_audit,
+                    snapshots,
+                ) = self._restore_room(store, persisted)
             except (PersistenceError, ValueError) as exc:
                 logger.warning(
                     "Skipping corrupt persisted room code=%s exception_type=%s",
@@ -1680,8 +1684,8 @@ class RoomRegistry:
                 runtime=runtime,
                 dm_traces=dm_traces,
                 dm_transport_traces=dm_transport_traces,
-                recovery_audit=store.load_recovery_audit(persisted.room_id),
-                snapshots=store.load_snapshots(persisted.room_id),
+                recovery_audit=recovery_audit,
+                snapshots=snapshots,
             )
             self.rooms[persisted.room_code] = actor
             actors_by_id[persisted.room_id] = actor
@@ -1708,6 +1712,8 @@ class RoomRegistry:
         PersistedRoomRuntime,
         tuple[DMTraceRecord, ...],
         tuple[DMTraceRecord, ...],
+        tuple[PersistedRecoveryAudit, ...],
+        tuple[PersistedSnapshot, ...],
     ]:
         try:
             state, events = store.load_core(persisted.room_id)
@@ -1747,7 +1753,9 @@ class RoomRegistry:
             persisted.room_id,
             "DM_TRANSPORT_TRACE",
         )
-        return core, runtime, dm_traces, dm_transport_traces
+        recovery_audit = store.load_recovery_audit(persisted.room_id)
+        snapshots = store.load_snapshots(persisted.room_id)
+        return core, runtime, dm_traces, dm_transport_traces, recovery_audit, snapshots
 
     def _new_actor(
         self,

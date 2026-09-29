@@ -1117,3 +1117,88 @@ def test_registry_restart_skips_only_room_with_corrupt_runtime(
     assert healthy.room_code in reopened.rooms
     assert corrupt.room_code not in reopened.rooms
     reopened_store.close()
+
+
+def test_registry_restart_isolates_corrupt_recovery_audit(tmp_path: Path) -> None:
+    database_path = tmp_path / "corrupt-recovery-audit.sqlite3"
+    room_ids = iter((UUID(int=701), UUID(int=702)))
+    store, registry = _open_registry(
+        database_path,
+        tokens=("host-one", "host-two"),
+        room_codes=("ROOM01", "ROOM02"),
+        uuid_source=lambda: next(room_ids),
+    )
+    corrupt = registry.create_room(_TOKEN_TTL)
+    healthy = registry.create_room(_TOKEN_TTL)
+    corrupt_actor = registry.get_by_code(corrupt.room_code)
+    audit = PersistedRecoveryAudit(
+        record_id=uuid4(),
+        room_id=corrupt_actor.room_id,
+        command_id=uuid4(),
+        status="REJECTED",
+        patch_type="SET_ALIVE",
+        before_revision=0,
+        after_revision=0,
+        diff={"players": {"1": {"alive": False}}},
+        reason="rejected correction",
+        created_at=_START,
+    )
+    store.append_recovery_audit(audit)
+    store.close()
+
+    connection = sqlite3.connect(database_path)
+    try:
+        connection.execute(
+            "UPDATE host_recovery_audit SET diff_json = ? WHERE record_id = ?",
+            ("{", str(audit.record_id)),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    reopened_store, reopened = _open_registry(database_path)
+
+    assert healthy.room_code in reopened.rooms
+    assert corrupt.room_code not in reopened.rooms
+    reopened_store.close()
+
+
+def test_registry_restart_isolates_corrupt_snapshot(tmp_path: Path) -> None:
+    database_path = tmp_path / "corrupt-snapshot.sqlite3"
+    room_ids = iter((UUID(int=801), UUID(int=802)))
+    store, registry = _open_registry(
+        database_path,
+        tokens=("host-one", "host-two"),
+        room_codes=("ROOM01", "ROOM02"),
+        uuid_source=lambda: next(room_ids),
+    )
+    corrupt = registry.create_room(_TOKEN_TTL)
+    healthy = registry.create_room(_TOKEN_TTL)
+    corrupt_actor = registry.get_by_code(corrupt.room_code)
+    snapshot = PersistedSnapshot(
+        snapshot_id=uuid4(),
+        room_id=corrupt_actor.room_id,
+        revision=0,
+        reason=SnapshotReason.PAUSED,
+        state=corrupt_actor.core.state,
+        event_count=0,
+        created_at=_START,
+    )
+    store.save_snapshot(snapshot)
+    store.close()
+
+    connection = sqlite3.connect(database_path)
+    try:
+        connection.execute(
+            "UPDATE room_snapshots SET state_json = ? WHERE snapshot_id = ?",
+            ("{", str(snapshot.snapshot_id)),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    reopened_store, reopened = _open_registry(database_path)
+
+    assert healthy.room_code in reopened.rooms
+    assert corrupt.room_code not in reopened.rooms
+    reopened_store.close()

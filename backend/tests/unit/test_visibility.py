@@ -301,6 +301,27 @@ def test_rejected_audit_does_not_change_state_hash_or_revision(core):
         )
 
 
+def test_host_correction_audit_diff_is_deeply_frozen():
+    audit = HostCorrectionAudit(
+        audit_kind="HOST_CORRECTION_APPLIED",
+        status="APPLIED",
+        command_id=_HOST_COMMAND_ID,
+        patch_type="SET_ALIVE",
+        before_revision=0,
+        after_revision=1,
+        diff={"players": [{"seat_id": 1, "alive": False}]},
+        reason="host correction",
+    )
+
+    with pytest.raises(TypeError):
+        audit.diff["players"] = ()
+    with pytest.raises(AttributeError):
+        audit.diff["players"].append({"seat_id": 2, "alive": False})
+    with pytest.raises(TypeError):
+        audit.diff["players"][0]["alive"] = True
+    assert audit.diff["players"][0]["alive"] is False
+
+
 def test_applied_correction_has_separate_compensation_event(core):
     correction = _host_correction_event(core, revision=1, event_ordinal=1)
     compensation = build_event(

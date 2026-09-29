@@ -394,7 +394,15 @@ class HostCorrectionAudit(EventPayload):
             raise ValueError("host correction audit kind and status must agree")
         if self.status == "REJECTED" and self.after_revision != self.before_revision:
             raise ValueError("rejected host correction cannot advance revision")
+        object.__setattr__(self, "diff", freeze_json_mapping(self.diff))
         return self
+
+    @field_serializer("diff")
+    def serialize_diff(
+        self,
+        diff: Mapping[str, JsonValue],
+    ) -> dict[str, JsonValue]:
+        return cast(dict[str, JsonValue], _thaw_json(diff))
 
 
 class HostRewindAudit(EventPayload):
