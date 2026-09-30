@@ -1,0 +1,32 @@
+{
+  "name": "ai-werewolf",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "网页版单人狼人杀：真人玩家 vs 11 个 AI NPC，2.5D 像素小镇",
+  "license": "MIT",
+  "author": "Leo Li",
+  "homepage": "https://leoli-dev.github.io/ai-werewolf/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/leoli-dev/ai-werewolf.git"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "three": "^0.186.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.2",
+    "@types/three": "^0.186.0",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.0",
+    "vitest": "^5.0.1"
+  }
+}

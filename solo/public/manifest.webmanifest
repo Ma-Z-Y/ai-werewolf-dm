@@ -1,0 +1,20 @@
+{
+  "name": "雾镇狼人夜",
+  "short_name": "雾镇狼人",
+  "description": "单人狼人杀：你与 11 位 AI 镇民同桌，支持离线规则 AI。",
+  "lang": "zh-CN",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0c0b0a",
+  "theme_color": "#0c0b0a",
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
