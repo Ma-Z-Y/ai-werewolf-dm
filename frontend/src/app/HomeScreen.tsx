@@ -54,8 +54,19 @@ export function HomeScreen() {
             狼人杀 DM
           </h1>
           <p className="max-w-xl text-base leading-7 text-text-muted">
-            创建一局，把房间码交给朋友；每个人用自己的手机加入。
+            无需下载，打开网页就能创建房间或加入朋友的对局。
           </p>
+          <div className="flex flex-wrap gap-2 text-sm text-text-muted">
+            <span className="rounded-full border border-text-muted/30 px-3 py-1">
+              无需下载
+            </span>
+            <span className="rounded-full border border-text-muted/30 px-3 py-1">
+              无需注册
+            </span>
+            <span className="rounded-full border border-text-muted/30 px-3 py-1">
+              手机即开
+            </span>
+          </div>
         </header>
 
         <section
@@ -112,6 +123,29 @@ export function HomeScreen() {
             <DoorOpen aria-hidden="true" size={18} />
             加入房间
           </Link>
+        </section>
+
+        <section
+          aria-labelledby="home-steps-title"
+          className="grid gap-4 border-t border-text-muted/25 pt-6"
+        >
+          <h2 id="home-steps-title" className="text-lg font-semibold">
+            开局三步
+          </h2>
+          <ol className="grid gap-3 text-sm text-text-muted sm:grid-cols-3">
+            <li className="rounded-lg border border-text-muted/20 p-4">
+              <strong className="block text-text">1. 创建房间</strong>
+              主持人输入名字后创建房间。
+            </li>
+            <li className="rounded-lg border border-text-muted/20 p-4">
+              <strong className="block text-text">2. 朋友加入</strong>
+              扫码或打开邀请链接，输入名字。
+            </li>
+            <li className="rounded-lg border border-text-muted/20 p-4">
+              <strong className="block text-text">3. 准备开局</strong>
+              6 人准备后自动开局。
+            </li>
+          </ol>
         </section>
       </div>
     </main>

@@ -3,6 +3,34 @@
 本项目从首个公开提交开始记录重要变更。格式参考 Keep a Changelog，
 版本遵循 Semantic Versioning。
 
+## Unreleased
+
+### Added
+
+- 在线即用网页交付：根目录 `Dockerfile` 和 `compose.yaml` 把 React
+  构建产物、FastAPI API、WebSocket 和 SQLite 持久卷放入同一服务。
+- 主持人创建房间后显示玩家邀请二维码、`/join/<房间码>` 链接、复制链接
+  和打开加入页入口；分享 URL 不包含 host、seat 或 display token。
+- 首页增加“无需下载、无需注册、手机即开”和创建、加入、准备三步说明。
+- CI 增加 single-origin Container job，实际构建镜像并验证健康检查、
+  首页、加入页和未知 API 404。
+
+### Changed
+
+- `create_app()` 支持 `WEREWOLF_DM_STATIC_DIR` 同源静态托管和 SPA
+  fallback；未知 API 路径仍返回 404。
+- 部署文档新增单容器启动、Cloudflare Tunnel、Caddy、持久卷和
+  Docker Hub 超时回退说明。
+
+### Verification
+
+- backend `774 passed, 10 skipped`
+- latency `8 passed, 2 skipped`
+- Vitest `179 passed`
+- Playwright `15 passed`
+- ruff、format、strict mypy、lint、typecheck、build 和
+  `verify-delivery.ps1` 通过
+
 ## 0.4.0 - 2026-09-29
 
 ### Added
@@ -20,8 +48,9 @@
   通过，完整交付门禁为 backend `773 passed, 10 skipped`、latency
   `8 passed, 2 skipped`、Vitest `175 passed`、Playwright `15 passed`。
 
-该变更已于 2026-09-29 按用户指定的等价验收方式完成验收，但仍仅存在
-本地分支；尚未 push、创建 PR、merge、tag 或 release。
+该变更已于 2026-09-29 按用户指定的等价验收方式完成验收，并通过
+PR #33 squash merge 为 `main@614d737`。annotated tag `v0.4.0` 与
+GitHub Release 已发布；主分支 CI 与 CodeQL 均成功。
 
 ## 0.3.0 - 2026-09-28
 

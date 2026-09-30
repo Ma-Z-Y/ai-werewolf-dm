@@ -1,0 +1,15 @@
+services:
+  app:
+    build:
+      context: .
+    image: werewolf-dm:local
+    environment:
+      WEREWOLF_DM_DB_PATH: /app/data/werewolf_dm.sqlite3
+    ports:
+      - "8000:8000"
+    volumes:
+      - werewolf_data:/app/data
+    restart: unless-stopped
+
+volumes:
+  werewolf_data:

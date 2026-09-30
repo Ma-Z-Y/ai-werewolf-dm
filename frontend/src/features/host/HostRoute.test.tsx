@@ -16,6 +16,12 @@ import {
   writeHostSession,
 } from "../../session/storage";
 
+vi.mock("qrcode", () => ({
+  default: {
+    toDataURL: vi.fn().mockResolvedValue("data:image/png;base64,qr"),
+  },
+}));
+
 class FakeWebSocket {
   static instances: FakeWebSocket[] = [];
 
@@ -411,6 +417,17 @@ describe("host control console", () => {
     expect(
       screen.getByRole("button", { name: "下载主持人审计" }),
     ).toBeVisible();
+  });
+
+  it("shows a shareable player invite link", async () => {
+    writeHostSessionForRoom();
+    renderHost();
+    await openHostSocket();
+
+    const expectedUrl = new URL("/join/ABCDEF", window.location.origin).href;
+    expect(screen.getByText("玩家邀请")).toBeVisible();
+    expect(screen.getByDisplayValue(expectedUrl)).toBeVisible();
+    expect(await screen.findByAltText("玩家加入二维码")).toBeVisible();
   });
 
   it("clears an expired host session", async () => {
