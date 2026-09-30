@@ -57,3 +57,8 @@ frontend/coverage/
 frontend/.vite/
 frontend/playwright-report/
 frontend/test-results/
+
+# Integrated pages
+solo/node_modules/
+site/node_modules/
+site/.vite/
