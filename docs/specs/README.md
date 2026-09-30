@@ -54,12 +54,26 @@ v1.5.6 / v1.1.6 进一步要求显式 intent 严格重校验，非法 channel �
   - 将 D1 至 D8 收窄为 template-only 产品原则、权责边界、信息纪律和
     验收原则。
 
+## S4-RE Proposed
+
+- [S4 Provider 重入设计 v0.1.0](2026-09-30-s4-provider-reentry-design.md)
+  - 状态：`proposed`
+  - 当前不修改 `s4-ai-dm-design@1.1.6`、`s4-ai-dm-constitution@1.1.0`
+    或 `verification-matrix@1.5.6` 的 frozen 语义。
+  - 定义独立 `S4-RE-*` 边界：模板先行、public-only provider、受控
+    phrase ID、1.5s cancel、1.6s fallback、2.0s admission ceiling、
+    默认关闭和 generation guard。
+  - 逐任务 TDD 计划：
+    `docs/superpowers/plans/2026-09-30-s4-provider-reentry.md`。
+  - 新会话交接：
+    `docs/handoff/2026-09-30-s4-provider-reentry-kickoff.md`。
+
 Template-only implementation plan 已完成；`S4-01` 至 `S4-06` 已实现、
 通过独立复核并由用户本地验收。`S4-07` 已完成生产实现、真实浏览器
 E2E、独立复核和完整交付门禁，并已于 2026-09-28 由用户正式验收通过。
 当前最终本地门禁为
-backend `640 passed, 10 skipped`、latency `8 passed, 2 skipped`、
-Vitest `166 passed`、Playwright `14 passed`。生产 `SEAT_PROMPT`
+backend `774 passed, 10 skipped`、latency `8 passed, 2 skipped`、
+Vitest `179 passed`、Playwright `15 passed`。生产 `SEAT_PROMPT`
 由 `RoomActor` 从领域 outbox 生成，浏览器证据直接来自真实 seat 消息，
 不再使用 E2E-only injection。Next Step 是 provider/LLM 重入的独立
 版本化设计，不在 S4-07 范围内。
