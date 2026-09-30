@@ -26,6 +26,18 @@ v1.5.6 / v1.1.6 进一步要求显式 intent 严格重校验，非法 channel �
 8. [S4 AI DM 设计 v1.1.6](2026-09-26-s4-ai-dm-design.md)
 9. [S4 AI DM 产品宪法 v1.1](2026-09-26-s4-ai-dm-constitution.md)
 10. [主持人纠错与最小持久化设计草案 v0.1.0](2026-09-28-host-recovery-persistence-design.md)
+11. [单人版并入与 Pages 视觉升级设计 v0.1.0](2026-09-30-integrated-solo-pages-design.md)
+
+## Pages and Solo Accepted
+
+- [单人版并入与 Pages 视觉升级设计 v0.1.0](2026-09-30-integrated-solo-pages-design.md)
+  - 状态：`accepted`
+  - 单人优化版以一级 `solo/` 子应用并入；GitHub Pages 同时发布主页
+    和 `/solo/` 可玩入口。
+  - 主页使用真实游戏画面和 Motion 编排，不移植单人运行时到 React
+    六人前端。
+  - 对应实施计划：
+    `docs/superpowers/plans/2026-09-30-integrated-solo-pages.md`。
 
 ## P1 Proposed
 

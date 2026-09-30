@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "site/**"
+      - "solo/**"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -27,13 +28,34 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
 
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            solo/package-lock.json
+            site/package-lock.json
+
+      - name: Verify single-player app
+        run: |
+          npm --prefix solo ci
+          npm --prefix solo test
+          npm --prefix solo run typecheck
+          npm --prefix solo run build
+
+      - name: Build composed Pages site
+        run: |
+          npm --prefix site ci
+          npm --prefix site run build
+
       - name: Configure Pages
         uses: actions/configure-pages@v5
 
       - name: Upload static site
         uses: actions/upload-pages-artifact@v3
         with:
-          path: site
+          path: site/dist
 
       - name: Deploy
         id: deployment

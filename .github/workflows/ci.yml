@@ -113,6 +113,35 @@ jobs:
         run: pnpm build
         working-directory: frontend
 
+  static-site:
+    name: Static site and solo (Node 24)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            solo/package-lock.json
+            site/package-lock.json
+
+      - name: Verify single-player app
+        run: |
+          npm --prefix solo ci
+          npm --prefix solo test
+          npm --prefix solo run typecheck
+          npm --prefix solo run build
+
+      - name: Build and verify composed Pages output
+        run: |
+          npm --prefix site ci
+          npm --prefix site run build
+
   container:
     name: Container (single-origin)
     needs: [backend, frontend]

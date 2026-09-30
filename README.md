@@ -32,6 +32,9 @@
   与重启恢复均通过。2026-09-29 已通过 PR #33 squash merge 为
   `614d737`，annotated tag `v0.4.0` 与 GitHub Release 已发布；主分支
   CI 与 CodeQL 均成功。
+- GitHub Pages 项目主页与单人模式：本仓库新增一级 `solo/` 子应用，
+  同时提供单机 12 人局和六人朋友局两个入口。主页和 `/solo/` 由
+  同一个 Pages workflow 构建发布；单人版保留上游 MIT 许可。
 
 准确状态和下一步以
 [`docs/specs/README.md`](docs/specs/README.md) 与
@@ -62,6 +65,22 @@ cloudflared tunnel --url http://127.0.0.1:8000
 ```
 
 固定域名、持久化、HTTPS 和运维说明见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)。
+
+## 单人试玩
+
+单人模式是浏览器内的完整 12 人牌桌，默认使用离线规则 AI，不需要
+API Key。合并到 `main` 后，GitHub Pages 会发布：
+
+- 项目主页：<https://ma-z-y.github.io/ai-werewolf-dm/>
+- 单人试玩：<https://ma-z-y.github.io/ai-werewolf-dm/solo/>
+
+本地开发：
+
+```powershell
+cd solo
+npm ci
+npm run dev
+```
 
 ## 快速开始
 
@@ -123,6 +142,8 @@ docs/specs/                    产品宪法、规则、系统设计与验证矩�
 docs/ARCHITECTURE.md           面向贡献者的架构入口
 docs/ROADMAP.md                分阶段路线图
 frontend/                      React 19 SPA、Vitest 与 Playwright E2E
+solo/                          Vite + Three.js 单人 12 人模式
+site/                          GitHub Pages 项目主页与发布合成
 ```
 
 更完整的领域设计从
@@ -135,4 +156,7 @@ frontend/                      React 19 SPA、Vitest 与 Playwright E2E
 
 ## 许可证
 
-Apache License 2.0，详见 [`LICENSE`](LICENSE)。
+六人朋友局的规则核心、后端、前端和项目主页采用 Apache License 2.0，
+详见 [`LICENSE`](LICENSE)。`solo/` 是上游 `leoli-dev/ai-werewolf`
+的 MIT 衍生版本，其许可和来源保存在 [`solo/LICENSE`](solo/LICENSE) 与
+[`solo/UPSTREAM.md`](solo/UPSTREAM.md)。
