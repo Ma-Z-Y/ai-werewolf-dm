@@ -8,8 +8,8 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build && node scripts/prepare-pages.mjs && node scripts/check-build.mjs",
-    "check": "node scripts/check-build.mjs",
+    "build": "tsc --noEmit && vite build && node tools/prepare-pages.mjs && node tools/check-build.mjs",
+    "check": "node tools/check-build.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

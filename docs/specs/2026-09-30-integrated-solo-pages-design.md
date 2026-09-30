@@ -68,7 +68,7 @@
 - `site/src/site.ts`：首屏、滚动编排和轻量交互。
 - `site/src/site.css`：主页视觉系统和响应式布局。
 - `site/public/assets/`：保留和补充真实产品截图。
-- `site/scripts/prepare-pages.mjs`：把单人版构建产物放入站点输出目录的
+- `site/tools/prepare-pages.mjs`：把单人版构建产物放入站点输出目录的
   `solo/` 子路径。
 
 `site/` 不承载运行时 API，也不代替 FastAPI 服务。
@@ -179,7 +179,7 @@ Three.js 游戏场景，主页只借用 Motion 做编排，避免第二套 3D �
 3. 在 `solo/` 执行 `npm ci`、`npm test`、`npm run typecheck` 和
    `npm run build`。
 4. 在 `site/` 执行 `npm ci` 和 `npm run build`。
-5. 执行 `site/scripts/prepare-pages.mjs`，把 `solo/dist/` 复制到
+5. 执行 `site/tools/prepare-pages.mjs`，把 `solo/dist/` 复制到
    `site/dist/solo/`。
 6. 配置并发布 `site/dist/`。
 
