@@ -1,4 +1,10 @@
-import { copyFileSync, existsSync } from 'node:fs';
+import {
+  copyFileSync,
+  existsSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
+import { resolve } from 'node:path';
 import { defineConfig, loadEnv, type Plugin } from 'vite';
 
 /**
@@ -45,6 +51,35 @@ function llmProxy(env: Record<string, string>): Plugin {
   };
 }
 
+function offlinePrecache(): Plugin {
+  return {
+    name: 'offline-precache',
+    apply: 'build',
+    closeBundle() {
+      const outDir = resolve(process.cwd(), 'dist');
+      const indexHtml = readFileSync(resolve(outDir, 'index.html'), 'utf8');
+      const assets = [
+        ...indexHtml.matchAll(/(?:src|href)="(\.\/assets\/[^"]+)"/g),
+      ].map((match) => match[1]);
+      const uniqueAssets = [...new Set(assets)];
+      const swPath = resolve(outDir, 'sw.js');
+      const serviceWorker = readFileSync(swPath, 'utf8');
+      const replacement =
+        `/* @vite-precache:start */ ${JSON.stringify(uniqueAssets)} ` +
+        '/* @vite-precache:end */';
+      const nextServiceWorker = serviceWorker.replace(
+        /\/\* @vite-precache:start \*\/[\s\S]*?\/\* @vite-precache:end \*\//,
+        replacement,
+      );
+
+      if (nextServiceWorker === serviceWorker) {
+        throw new Error('service worker precache placeholder was not found');
+      }
+      writeFileSync(swPath, nextServiceWorker);
+    },
+  };
+}
+
 export default defineConfig(({ mode }) => {
   // first run: seed .env from the committed template
   if (!existsSync('.env') && existsSync('.env.example')) copyFileSync('.env.example', '.env');
@@ -61,7 +96,7 @@ export default defineConfig(({ mode }) => {
     LLM_HAS_KEY: env.LLM_API_KEY ? '1' : '',
   };
   return {
-    plugins: [llmProxy(env)],
+    plugins: [llmProxy(env), offlinePrecache()],
     define: { __LLM_ENV__: JSON.stringify(browserEnv) },
     // relative asset paths: the build works under any sub-path (GitHub Pages: /<repo>/)
     base: './',
