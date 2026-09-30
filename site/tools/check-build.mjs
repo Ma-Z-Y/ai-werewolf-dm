@@ -20,16 +20,22 @@ if (missing.length > 0) {
   throw new Error(`Missing build output: ${missing.join(", ")}`);
 }
 
-const indexHtml = readFileSync(resolve(distDir, "index.html"), "utf8");
-if (/(?:src|href)="\/(?!\/)/.test(indexHtml)) {
-  throw new Error(
-    "The composed site contains root-absolute asset URLs and will not work under the repository subpath.",
-  );
+function assertRelativeAssetUrls(relativePath) {
+  const html = readFileSync(resolve(distDir, relativePath), "utf8");
+  if (/(?:src|href)="\/(?!\/)/.test(html)) {
+    throw new Error(
+      `${relativePath} contains root-absolute asset URLs and will not work under the repository subpath.`,
+    );
+  }
+  return html;
 }
 
+const indexHtml = assertRelativeAssetUrls("index.html");
+assertRelativeAssetUrls("solo/index.html");
+
 if (!indexHtml.includes('href="./solo/"')) {
-  console.warn(
-    "Warning: homepage does not yet link to ./solo/; Task 3 must add the playable entry.",
+  throw new Error(
+    "Homepage does not link to ./solo/; the playable GitHub Pages entry is missing.",
   );
 }
 
