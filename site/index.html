@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="AI 狼人杀 DM：面向 6 人朋友局的 AI 主持人，支持手机加入、共享屏、规则裁决、角色信息隔离、主持恢复与在线部署。"
+    />
+    <meta name="theme-color" content="#0d0c0a" />
+    <title>AI 狼人杀 DM · 6 人朋友局</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="#top" aria-label="返回顶部">
+        <span class="brand-mark">WDM</span>
+        <span>AI 狼人杀 DM</span>
+      </a>
+      <nav class="site-nav" aria-label="页面导航">
+        <a href="#features">能力</a>
+        <a href="#flow">玩法</a>
+        <a href="#deploy">部署</a>
+        <a href="#architecture">架构</a>
+      </nav>
+      <a class="header-link" href="https://github.com/Ma-Z-Y/ai-werewolf-dm">GitHub</a>
+    </header>
+
+    <main id="top">
+      <section class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">AI 主持 · 真人玩家 · 6 人朋友局</p>
+          <h1>把主持人交给 AI，<br />把推理留给玩家。</h1>
+          <p class="hero-lead">
+            玩家用手机加入，共享屏承载公共舞台。AI 只负责主持、裁决、叙述和引导，
+            不补位玩家，也不替玩家做推理。
+          </p>
+          <div class="hero-actions">
+            <a class="button primary" href="https://github.com/Ma-Z-Y/ai-werewolf-dm">查看源码</a>
+            <a class="button" href="#deploy">部署说明</a>
+          </div>
+          <ul class="hero-facts" aria-label="项目特点">
+            <li><span>6</span> 人固定局</li>
+            <li><span>1</span> 个 AI DM</li>
+            <li><span>0</span> 个玩家替身</li>
+          </ul>
+        </div>
+        <div class="hero-visual" aria-label="项目主页真实截图">
+          <div class="window-bar">
+            <span></span><span></span><span></span>
+            <p>ai-werewolf-dm / 主页</p>
+          </div>
+          <img src="./assets/home-desktop.png" alt="AI 狼人杀 DM 首页真实界面截图" />
+        </div>
+      </section>
+
+      <section class="notice" aria-label="GitHub Pages 说明">
+        <strong>项目主页由 GitHub Pages 托管。</strong>
+        <span>
+          完整对局需要项目自己的 FastAPI 服务、WebSocket 和 SQLite 持久化；
+          Pages 只承载项目展示与部署入口，不替代游戏后端。
+        </span>
+      </section>
+
+      <section id="features" class="section">
+        <div class="section-heading">
+          <p class="eyebrow">职责边界</p>
+          <h2>AI 是主持人，不是第 7 名玩家</h2>
+          <p>
+            状态变化只能经过领域状态机。AI 不能直接篡改游戏状态，也不能读取不该看到的隐藏信息。
+          </p>
+        </div>
+        <div class="feature-grid">
+          <article class="feature">
+            <span class="feature-index">01</span>
+            <h3>规则裁判</h3>
+            <p>夜晚顺序、发言、投票、PK、技能结算和胜负都由确定性状态机完成。</p>
+            <p class="feature-detail">GameCore · apply_command()</p>
+          </article>
+          <article class="feature">
+            <span class="feature-index">02</span>
+            <h3>信息隔离</h3>
+            <p>公共舞台、玩家座位和主持人审计是不同投影边界，跨座位订阅直接拒绝。</p>
+            <p class="feature-detail">PublicView · SeatView · HostControlView</p>
+          </article>
+          <article class="feature">
+            <span class="feature-index">03</span>
+            <h3>连续可玩</h3>
+            <p>房间令牌、断线重连、暂停恢复、主持纠错和 SQLite 持久化都已接通。</p>
+            <p class="feature-detail">RoomActor · Recovery · SQLite</p>
+          </article>
+        </div>
+      </section>
+
+      <section id="flow" class="section split-section">
+        <div class="section-heading compact">
+          <p class="eyebrow">一局怎么开始</p>
+          <h2>六个手机，一块共享屏</h2>
+          <p>主持人创建房间后分享邀请链接，玩家加入并准备；六席就绪后自动开局。</p>
+        </div>
+        <ol class="flow-list">
+          <li>
+            <span>1</span>
+            <div>
+              <h3>启动服务</h3>
+              <p>单个 Docker 容器同时提供前端、API、WebSocket 和 SQLite 数据卷。</p>
+            </div>
+          </li>
+          <li>
+            <span>2</span>
+            <div>
+              <h3>主持人创房</h3>
+              <p>控制台生成六位房间码、邀请二维码和可直接分享的加入链接。</p>
+            </div>
+          </li>
+          <li>
+            <span>3</span>
+            <div>
+              <h3>玩家入场</h3>
+              <p>六名真人分别用手机加入自己的座位，共享屏只显示公共信息。</p>
+            </div>
+          </li>
+          <li>
+            <span>4</span>
+            <div>
+              <h3>AI 接管主持</h3>
+              <p>阶段推进、合理超时、播报与审计由服务端完成，玩家专注发言和投票。</p>
+            </div>
+          </li>
+        </ol>
+        <figure class="mobile-shot">
+          <img src="./assets/home-mobile.png" alt="AI 狼人杀 DM 手机端真实界面截图" />
+          <figcaption>手机即开，不需要下载 App</figcaption>
+        </figure>
+      </section>
+
+      <section class="section status-section">
+        <div class="section-heading">
+          <p class="eyebrow">当前状态</p>
+          <h2>完整闭环，而不是概念草图</h2>
+        </div>
+        <div class="status-grid">
+          <div class="status-item">
+            <span class="status-label">规则核心</span>
+            <strong>S1 已完成</strong>
+            <p>领域模型、状态机、投影与确定性回放。</p>
+          </div>
+          <div class="status-item">
+            <span class="status-label">实时接口</span>
+            <strong>S2 已完成</strong>
+            <p>FastAPI、WebSocket、令牌、频道、计时与错误边界。</p>
+          </div>
+          <div class="status-item">
+            <span class="status-label">玩家前端</span>
+            <strong>S3 已完成</strong>
+            <p>手机玩家、共享舞台、主持控制台与回放。</p>
+          </div>
+          <div class="status-item">
+            <span class="status-label">AI DM</span>
+            <strong>S4 已完成</strong>
+            <p>服务端模板、严格输出边界和真实传输路径。</p>
+          </div>
+          <div class="status-item">
+            <span class="status-label">恢复与持久化</span>
+            <strong>P1 已完成</strong>
+            <p>快照回退、主持纠错、重启恢复和审计导出。</p>
+          </div>
+          <div class="status-item accent">
+            <span class="status-label">公开发布</span>
+            <strong>v0.4.0</strong>
+            <p>单容器同源部署、邀请分享和持久化数据卷。</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="deploy" class="section deploy-section">
+        <div class="deploy-copy">
+          <p class="eyebrow">打开即玩</p>
+          <h2>一条命令启动</h2>
+          <p>
+            项目提供单容器部署。Docker Compose 会构建前端，安装 Python 后端，
+            并把 API、WebSocket 和静态资源放在同一个端口。
+          </p>
+          <div class="command">
+            <code>docker compose up -d --build</code>
+            <button type="button" data-copy="docker compose up -d --build">复制</button>
+          </div>
+          <p class="deploy-note">
+            临时公网访问可使用 Cloudflare Tunnel；固定域名建议使用 HTTPS 反向代理。
+          </p>
+          <div class="hero-actions">
+            <a class="button primary" href="https://github.com/Ma-Z-Y/ai-werewolf-dm/blob/main/docs/DEPLOYMENT.md">阅读部署文档</a>
+            <a class="button" href="https://github.com/Ma-Z-Y/ai-werewolf-dm/blob/main/compose.yaml">查看 compose.yaml</a>
+          </div>
+        </div>
+        <div class="deploy-terminal" aria-label="部署命令示例">
+          <div class="terminal-head">PowerShell / Docker Compose</div>
+          <pre><code><span class="prompt">PS&gt;</span> docker compose up -d --build
+<span class="ok">✔</span> frontend build
+<span class="ok">✔</span> Python 3.12 backend
+<span class="ok">✔</span> SQLite persistent volume
+
+http://127.0.0.1:8000
+healthz  status: ok</code></pre>
+        </div>
+      </section>
+
+      <section id="architecture" class="section architecture-section">
+        <div class="section-heading">
+          <p class="eyebrow">架构边界</p>
+          <h2>规则核心保持纯净</h2>
+          <p>
+            领域层不依赖 FastAPI、WebSocket、数据库、墙钟时间或全局随机数。
+            适配层负责传输，运行时负责串行写入和恢复。
+          </p>
+        </div>
+        <div class="architecture-grid">
+          <pre class="tree"><code>backend/
+  domain/       rules · state machine · projections
+  application/  core · room actor · recovery
+  interfaces/   FastAPI · WebSocket · audit
+frontend/
+  player/       seat view · actions · replay
+  host/         pairing · pause · recovery
+  stage/        public-only shared screen
+docs/
+  specs/        frozen contracts
+  DEPLOYMENT.md single-container delivery</code></pre>
+          <div class="principles">
+            <h3>不可让步的约束</h3>
+            <ul>
+              <li>所有状态变化都必须经过 <code>apply_command()</code>。</li>
+              <li>AI 不拥有状态，也不能绕过规则核心。</li>
+              <li>座位私密信息不进入公共屏或其他座位。</li>
+              <li>公开契约使用严格模型与确定性验证。</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="section closing">
+        <p class="eyebrow">AI-assisted Werewolf Game Master</p>
+        <h2>让每个人都能回到牌桌上。</h2>
+        <p>项目采用 Apache License 2.0。源码、部署文档、规格与路线图均在 GitHub 仓库中。</p>
+        <div class="hero-actions">
+          <a class="button primary" href="https://github.com/Ma-Z-Y/ai-werewolf-dm">打开 GitHub</a>
+          <a class="button" href="https://github.com/Ma-Z-Y/ai-werewolf-dm/blob/main/docs/ROADMAP.md">查看路线图</a>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <span>AI 狼人杀 DM</span>
+      <span>Apache License 2.0</span>
+      <a href="https://github.com/Ma-Z-Y/ai-werewolf-dm">Ma-Z-Y/ai-werewolf-dm</a>
+    </footer>
+
+    <script>
+      const copyButton = document.querySelector('[data-copy]');
+      copyButton?.addEventListener('click', async () => {
+        const text = copyButton.getAttribute('data-copy');
+        if (!text) return;
+        try {
+          await navigator.clipboard.writeText(text);
+          copyButton.textContent = '已复制';
+          window.setTimeout(() => (copyButton.textContent = '复制'), 1600);
+        } catch {
+          copyButton.textContent = '请手动复制';
+        }
+      });
+    </script>
+  </body>
+</html>
