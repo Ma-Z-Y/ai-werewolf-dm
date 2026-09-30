@@ -5,269 +5,435 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta
       name="description"
-      content="AI 狼人杀 DM：面向 6 人朋友局的 AI 主持人，支持手机加入、共享屏、规则裁决、角色信息隔离、主持恢复与在线部署。"
+      content="狼人杀 DM：单人 12 人离线规则 AI，或 6 名真人的 AI 主持人朋友局。打开网页即可试玩。"
     />
-    <meta name="theme-color" content="#0d0c0a" />
-    <title>AI 狼人杀 DM · 6 人朋友局</title>
-    <link rel="stylesheet" href="./styles.css" />
+    <meta name="theme-color" content="#07090a" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="狼人杀 DM · 一桌两种玩法" />
+    <meta
+      property="og:description"
+      content="单人立即开一局，或者叫上五个朋友。AI 主持，真人推理。"
+    />
+    <meta
+      property="og:image"
+      content="https://ma-z-y.github.io/ai-werewolf-dm/assets/solo-hero.jpg"
+    />
+    <title>狼人杀 DM · 单人试玩与六人朋友局</title>
+    <link rel="stylesheet" href="./src/site.css" />
+    <script type="module" src="./src/site.ts"></script>
   </head>
   <body>
-    <header class="site-header">
-      <a class="brand" href="#top" aria-label="返回顶部">
-        <span class="brand-mark">WDM</span>
-        <span>AI 狼人杀 DM</span>
-      </a>
-      <nav class="site-nav" aria-label="页面导航">
-        <a href="#features">能力</a>
-        <a href="#flow">玩法</a>
-        <a href="#deploy">部署</a>
-        <a href="#architecture">架构</a>
-      </nav>
-      <a class="header-link" href="https://github.com/Ma-Z-Y/ai-werewolf-dm">GitHub</a>
+    <a class="skip-link" href="#main">跳到主要内容</a>
+
+    <header class="site-header" data-header>
+      <div class="progress-track" aria-hidden="true">
+        <span class="progress-bar"></span>
+      </div>
+      <div class="header-inner">
+        <a class="brand" href="#top" aria-label="返回页面顶部">
+          <span class="brand-mark" aria-hidden="true">DM</span>
+          <span>狼人杀 DM</span>
+        </a>
+        <nav class="site-nav" aria-label="页面导航">
+          <a href="#modes">模式</a>
+          <a href="#single">单人</a>
+          <a href="#six-player">六人</a>
+          <a href="#proof">游戏实机</a>
+          <a href="#deploy">部署</a>
+        </nav>
+        <a
+          class="header-github"
+          href="https://github.com/Ma-Z-Y/ai-werewolf-dm"
+          target="_blank"
+          rel="noreferrer"
+        >
+          GitHub
+        </a>
+      </div>
     </header>
 
-    <main id="top">
-      <section class="hero">
-        <div class="hero-copy">
-          <p class="eyebrow">AI 主持 · 真人玩家 · 6 人朋友局</p>
-          <h1>把主持人交给 AI，<br />把推理留给玩家。</h1>
+    <main id="main">
+      <section id="top" class="hero" aria-labelledby="hero-title">
+        <img
+          class="hero-image"
+          src="./assets/solo-hero.jpg"
+          alt="雾镇夜间对局，狼人角色在雨中广场围坐"
+          fetchpriority="high"
+        />
+        <div class="hero-shade" aria-hidden="true"></div>
+        <div class="fog-layer" aria-hidden="true"></div>
+
+        <div class="hero-content">
+          <p class="hero-kicker">AI WEREWOLF · 单人 / 朋友局</p>
+          <h1 id="hero-title">狼人杀<br />DM</h1>
           <p class="hero-lead">
-            玩家用手机加入，共享屏承载公共舞台。AI 只负责主持、裁决、叙述和引导，
-            不补位玩家，也不替玩家做推理。
+            一张桌子，两种玩法。单人立即开一局，或者叫上五个朋友。
           </p>
           <div class="hero-actions">
-            <a class="button primary" href="https://github.com/Ma-Z-Y/ai-werewolf-dm">查看源码</a>
-            <a class="button" href="#deploy">部署说明</a>
+            <a class="button primary" href="./solo/">
+              <span>单人试玩</span>
+              <span aria-hidden="true">→</span>
+            </a>
+            <a class="button secondary" href="#six-player">
+              <span>六人朋友局</span>
+              <span aria-hidden="true">↓</span>
+            </a>
           </div>
-          <ul class="hero-facts" aria-label="项目特点">
-            <li><span>6</span> 人固定局</li>
-            <li><span>1</span> 个 AI DM</li>
-            <li><span>0</span> 个玩家替身</li>
-          </ul>
-        </div>
-        <div class="hero-visual" aria-label="项目主页真实截图">
-          <div class="window-bar">
-            <span></span><span></span><span></span>
-            <p>ai-werewolf-dm / 主页</p>
-          </div>
-          <img src="./assets/home-desktop.png" alt="AI 狼人杀 DM 首页真实界面截图" />
-        </div>
-      </section>
-
-      <section class="notice" aria-label="GitHub Pages 说明">
-        <strong>项目主页由 GitHub Pages 托管。</strong>
-        <span>
-          完整对局需要项目自己的 FastAPI 服务、WebSocket 和 SQLite 持久化；
-          Pages 只承载项目展示与部署入口，不替代游戏后端。
-        </span>
-      </section>
-
-      <section id="features" class="section">
-        <div class="section-heading">
-          <p class="eyebrow">职责边界</p>
-          <h2>AI 是主持人，不是第 7 名玩家</h2>
-          <p>
-            状态变化只能经过领域状态机。AI 不能直接篡改游戏状态，也不能读取不该看到的隐藏信息。
+          <p class="hero-note">
+            <span class="live-dot" aria-hidden="true"></span>
+            离线规则 AI 已就绪，不需要 API Key
           </p>
         </div>
-        <div class="feature-grid">
-          <article class="feature">
-            <span class="feature-index">01</span>
-            <h3>规则裁判</h3>
-            <p>夜晚顺序、发言、投票、PK、技能结算和胜负都由确定性状态机完成。</p>
-            <p class="feature-detail">GameCore · apply_command()</p>
-          </article>
-          <article class="feature">
-            <span class="feature-index">02</span>
-            <h3>信息隔离</h3>
-            <p>公共舞台、玩家座位和主持人审计是不同投影边界，跨座位订阅直接拒绝。</p>
-            <p class="feature-detail">PublicView · SeatView · HostControlView</p>
-          </article>
-          <article class="feature">
-            <span class="feature-index">03</span>
-            <h3>连续可玩</h3>
-            <p>房间令牌、断线重连、暂停恢复、主持纠错和 SQLite 持久化都已接通。</p>
-            <p class="feature-detail">RoomActor · Recovery · SQLite</p>
-          </article>
-        </div>
+
+        <dl class="hero-tally" aria-label="单人模式规则规模">
+          <div>
+            <dt>座位</dt>
+            <dd>12</dd>
+          </div>
+          <div>
+            <dt>真人</dt>
+            <dd>1</dd>
+          </div>
+          <div>
+            <dt>规则 AI</dt>
+            <dd>11</dd>
+          </div>
+        </dl>
+
+        <p class="hero-scroll" aria-hidden="true">
+          <span>向下看两种开局</span>
+          <span class="scroll-line"></span>
+        </p>
       </section>
 
-      <section id="flow" class="section split-section">
-        <div class="section-heading compact">
-          <p class="eyebrow">一局怎么开始</p>
-          <h2>六个手机，一块共享屏</h2>
-          <p>主持人创建房间后分享邀请链接，玩家加入并准备；六席就绪后自动开局。</p>
-        </div>
-        <ol class="flow-list">
-          <li>
-            <span>1</span>
-            <div>
-              <h3>启动服务</h3>
-              <p>单个 Docker 容器同时提供前端、API、WebSocket 和 SQLite 数据卷。</p>
-            </div>
-          </li>
-          <li>
-            <span>2</span>
-            <div>
-              <h3>主持人创房</h3>
-              <p>控制台生成六位房间码、邀请二维码和可直接分享的加入链接。</p>
-            </div>
-          </li>
-          <li>
-            <span>3</span>
-            <div>
-              <h3>玩家入场</h3>
-              <p>六名真人分别用手机加入自己的座位，共享屏只显示公共信息。</p>
-            </div>
-          </li>
-          <li>
-            <span>4</span>
-            <div>
-              <h3>AI 接管主持</h3>
-              <p>阶段推进、合理超时、播报与审计由服务端完成，玩家专注发言和投票。</p>
-            </div>
-          </li>
-        </ol>
-        <figure class="mobile-shot">
-          <img src="./assets/home-mobile.png" alt="AI 狼人杀 DM 手机端真实界面截图" />
-          <figcaption>手机即开，不需要下载 App</figcaption>
-        </figure>
-      </section>
-
-      <section class="section status-section">
-        <div class="section-heading">
-          <p class="eyebrow">当前状态</p>
-          <h2>完整闭环，而不是概念草图</h2>
-        </div>
-        <div class="status-grid">
-          <div class="status-item">
-            <span class="status-label">规则核心</span>
-            <strong>S1 已完成</strong>
-            <p>领域模型、状态机、投影与确定性回放。</p>
-          </div>
-          <div class="status-item">
-            <span class="status-label">实时接口</span>
-            <strong>S2 已完成</strong>
-            <p>FastAPI、WebSocket、令牌、频道、计时与错误边界。</p>
-          </div>
-          <div class="status-item">
-            <span class="status-label">玩家前端</span>
-            <strong>S3 已完成</strong>
-            <p>手机玩家、共享舞台、主持控制台与回放。</p>
-          </div>
-          <div class="status-item">
-            <span class="status-label">AI DM</span>
-            <strong>S4 已完成</strong>
-            <p>服务端模板、严格输出边界和真实传输路径。</p>
-          </div>
-          <div class="status-item">
-            <span class="status-label">恢复与持久化</span>
-            <strong>P1 已完成</strong>
-            <p>快照回退、主持纠错、重启恢复和审计导出。</p>
-          </div>
-          <div class="status-item accent">
-            <span class="status-label">公开发布</span>
-            <strong>v0.4.0</strong>
-            <p>单容器同源部署、邀请分享和持久化数据卷。</p>
-          </div>
-        </div>
-      </section>
-
-      <section id="deploy" class="section deploy-section">
-        <div class="deploy-copy">
-          <p class="eyebrow">打开即玩</p>
-          <h2>一条命令启动</h2>
+      <section id="modes" class="mode-section section">
+        <div class="section-intro reveal">
+          <p class="section-index">01 / MODE SELECT</p>
+          <h2>先选这一局怎么开</h2>
           <p>
-            项目提供单容器部署。Docker Compose 会构建前端，安装 Python 后端，
-            并把 API、WebSocket 和静态资源放在同一个端口。
+            单人模式把完整 12 人牌桌留在浏览器里；六人模式把主持人交给 AI，
+            让朋友用手机坐到各自的座位。
+          </p>
+        </div>
+
+        <div class="mode-grid">
+          <article class="mode-panel mode-solo reveal">
+            <div class="mode-panel-top">
+              <span class="mode-label">SOLO / OFFLINE RULES</span>
+              <span class="mode-status">现在就能玩</span>
+            </div>
+            <h3>单人模式</h3>
+            <p class="mode-number">01</p>
+            <p class="mode-description">
+              你面对 11 名规则 AI。无需配置模型，自动存档，刷新后还能继续。
+            </p>
+            <ul class="mode-list">
+              <li>完整 12 人规则</li>
+              <li>警长竞选与颁奖典礼</li>
+              <li>PWA 离线启动</li>
+            </ul>
+            <a class="text-link" href="./solo/">
+              打开单人试玩
+              <span aria-hidden="true">→</span>
+            </a>
+          </article>
+
+          <article class="mode-panel mode-party reveal">
+            <div class="mode-panel-top">
+              <span class="mode-label">PARTY / AI HOST</span>
+              <span class="mode-status">需要启动服务</span>
+            </div>
+            <h3>六人朋友局</h3>
+            <p class="mode-number">06</p>
+            <p class="mode-description">
+              六个朋友用手机加入，共享屏只展示公共舞台。AI 只主持和裁决。
+            </p>
+            <ul class="mode-list">
+              <li>房间码与邀请二维码</li>
+              <li>座位私密信息隔离</li>
+              <li>断线重连与主持恢复</li>
+            </ul>
+            <a class="text-link" href="#six-player">
+              查看朋友局
+              <span aria-hidden="true">↓</span>
+            </a>
+          </article>
+        </div>
+      </section>
+
+      <section id="single" class="single-section section">
+        <div class="single-copy reveal">
+          <p class="section-index">02 / SINGLE PLAYER</p>
+          <h2>一个人，也能立刻开局</h2>
+          <p class="section-lead">
+            单人版保留完整 12 人局、警长竞选和赛后颁奖。默认使用本地规则 AI，
+            想接大模型时再打开配置。
+          </p>
+          <dl class="feature-ledger">
+            <div>
+              <dt>不等待</dt>
+              <dd>点开新游戏就能进入夜晚，不需要等朋友上线。</dd>
+            </div>
+            <div>
+              <dt>不丢局</dt>
+              <dd>每次推进自动落盘，切后台或关页面后可以继续。</dd>
+            </div>
+            <div>
+              <dt>不离线失效</dt>
+              <dd>首次加载后注册 PWA，断网也能重新打开牌桌。</dd>
+            </div>
+          </dl>
+        </div>
+
+        <div class="single-visual reveal" aria-label="单人模式真实界面">
+          <figure class="device device-desktop">
+            <img
+              src="./assets/solo-hero.jpg"
+              alt="单人狼人杀夜间对局，玩家与 AI 小镇居民围坐在广场"
+              loading="lazy"
+            />
+            <figcaption>完整对局，真实 Three.js 场景</figcaption>
+          </figure>
+          <figure class="device device-mobile">
+            <img
+              src="./assets/solo-mobile-play.jpg"
+              alt="手机上的单人狼人杀发言界面"
+              loading="lazy"
+            />
+            <figcaption>手机同样可玩</figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <section id="six-player" class="party-section section">
+        <div class="party-heading reveal">
+          <p class="section-index">03 / SIX PLAYERS</p>
+          <h2>六个真人，一个不会篡改规则的 AI</h2>
+          <p>
+            AI DM 不补位、不替玩家推理。它只负责推动阶段、执行规则、
+            隔离私密信息和保存可恢复的对局状态。
+          </p>
+        </div>
+
+        <div class="party-stage reveal">
+          <div class="seat-constellation" aria-label="六个玩家座位">
+            <span>01</span>
+            <span>02</span>
+            <span>03</span>
+            <span>04</span>
+            <span>05</span>
+            <span>06</span>
+            <strong>AI DM</strong>
+          </div>
+          <figure class="party-shot">
+            <img
+              src="./assets/home-desktop.png"
+              alt="六人朋友局创建房间界面"
+              loading="lazy"
+            />
+          </figure>
+          <div class="party-copy">
+            <h3>主持人开房，朋友扫码入座</h3>
+            <p>
+              每个玩家获得独立座位令牌。公共屏、玩家手机和主持人审计分别使用不同的信息投影。
+            </p>
+          </div>
+        </div>
+
+        <div class="party-facts reveal">
+          <article>
+            <span class="fact-code">CORE</span>
+            <h3>所有状态变化都经过规则核心</h3>
+            <p>AI 不拥有状态，也不能跳过 <code>apply_command()</code> 修改游戏。</p>
+          </article>
+          <article>
+            <span class="fact-code">VIEW</span>
+            <h3>公共、座位、主持三层投影</h3>
+            <p>跨座位订阅直接拒绝，隐藏事实不会进入共享屏。</p>
+          </article>
+          <article>
+            <span class="fact-code">RECOVER</span>
+            <h3>服务器重启后还能回到牌桌</h3>
+            <p>房间、令牌、事件和恢复审计写入 SQLite，原凭据可以重连。</p>
+          </article>
+        </div>
+      </section>
+
+      <section id="proof" class="proof-section section">
+        <div class="section-intro reveal">
+          <p class="section-index">04 / GAME PROOF</p>
+          <h2>这不是概念图，是真的能走完一局</h2>
+          <p>
+            夜间行动、狼人频道、警长竞选、遗言、投票、终局和颁奖典礼都在浏览器中完成。
+          </p>
+        </div>
+
+        <div class="proof-gallery">
+          <figure class="proof-item reveal">
+            <img
+              src="./assets/solo-mobile-night.jpg"
+              alt="手机上的狼人夜间频道与刀人选择"
+              loading="lazy"
+            />
+            <figcaption>
+              <span>NIGHT</span>
+              夜间行动与狼队频道
+            </figcaption>
+          </figure>
+          <figure class="proof-item reveal">
+            <img
+              src="./assets/solo-ceremony.jpg"
+              alt="单人狼人杀赛后颁奖典礼，全场最佳站在领奖台上"
+              loading="lazy"
+            />
+            <figcaption>
+              <span>AFTER GAME</span>
+              赛后复盘与颁奖典礼
+            </figcaption>
+          </figure>
+          <figure class="proof-item reveal">
+            <img
+              src="./assets/home-mobile.png"
+              alt="六人朋友局的手机加入界面"
+              loading="lazy"
+            />
+            <figcaption>
+              <span>PARTY</span>
+              手机加入六人朋友局
+            </figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <section id="deploy" class="deploy-section section">
+        <div class="deploy-copy reveal">
+          <p class="section-index">05 / RUN LOCALLY</p>
+          <h2>朋友局只要一条命令</h2>
+          <p>
+            单容器同时提供 React 前端、FastAPI、WebSocket 和 SQLite 数据卷。
+            玩家只需要打开邀请链接。
           </p>
           <div class="command">
             <code>docker compose up -d --build</code>
-            <button type="button" data-copy="docker compose up -d --build">复制</button>
+            <button type="button" data-copy="docker compose up -d --build">
+              复制
+            </button>
           </div>
           <p class="deploy-note">
-            临时公网访问可使用 Cloudflare Tunnel；固定域名建议使用 HTTPS 反向代理。
+            临时公网访问可用 Cloudflare Tunnel，固定域名建议搭配 HTTPS 反向代理。
           </p>
-          <div class="hero-actions">
-            <a class="button primary" href="https://github.com/Ma-Z-Y/ai-werewolf-dm/blob/main/docs/DEPLOYMENT.md">阅读部署文档</a>
-            <a class="button" href="https://github.com/Ma-Z-Y/ai-werewolf-dm/blob/main/compose.yaml">查看 compose.yaml</a>
+          <div class="inline-actions">
+            <a
+              class="text-link"
+              href="https://github.com/Ma-Z-Y/ai-werewolf-dm/blob/main/docs/DEPLOYMENT.md"
+              target="_blank"
+              rel="noreferrer"
+            >
+              阅读部署文档
+              <span aria-hidden="true">↗</span>
+            </a>
+            <a
+              class="text-link"
+              href="https://github.com/Ma-Z-Y/ai-werewolf-dm"
+              target="_blank"
+              rel="noreferrer"
+            >
+              浏览源码
+              <span aria-hidden="true">↗</span>
+            </a>
           </div>
         </div>
-        <div class="deploy-terminal" aria-label="部署命令示例">
-          <div class="terminal-head">PowerShell / Docker Compose</div>
+
+        <div class="terminal reveal" aria-label="部署命令输出示例">
+          <div class="terminal-bar">
+            <span></span><span></span><span></span>
+            <p>werewolf-dm / compose</p>
+          </div>
           <pre><code><span class="prompt">PS&gt;</span> docker compose up -d --build
-<span class="ok">✔</span> frontend build
-<span class="ok">✔</span> Python 3.12 backend
-<span class="ok">✔</span> SQLite persistent volume
+<span class="ok">✓</span> frontend build
+<span class="ok">✓</span> Python 3.12 backend
+<span class="ok">✓</span> SQLite persistent volume
 
-http://127.0.0.1:8000
-healthz  status: ok</code></pre>
+local  http://127.0.0.1:8000
+health { "status": "ok" }</code></pre>
         </div>
       </section>
 
-      <section id="architecture" class="section architecture-section">
-        <div class="section-heading">
-          <p class="eyebrow">架构边界</p>
-          <h2>规则核心保持纯净</h2>
+      <section id="architecture" class="architecture-section section">
+        <div class="architecture-copy reveal">
+          <p class="section-index">06 / OPEN SOURCE</p>
+          <h2>两种模式，两条清晰的技术边界</h2>
           <p>
-            领域层不依赖 FastAPI、WebSocket、数据库、墙钟时间或全局随机数。
-            适配层负责传输，运行时负责串行写入和恢复。
+            单人版是基于上游 MIT 项目的独立静态应用；六人朋友局是 Apache-2.0
+            规则核心与实时服务。两者共用产品入口，不强行合并运行时。
           </p>
         </div>
-        <div class="architecture-grid">
-          <pre class="tree"><code>backend/
-  domain/       rules · state machine · projections
-  application/  core · room actor · recovery
-  interfaces/   FastAPI · WebSocket · audit
+
+        <div class="architecture-grid reveal">
+          <div class="architecture-column">
+            <span class="architecture-tag">SOLO / MIT</span>
+            <h3>浏览器里的完整牌桌</h3>
+            <pre><code>solo/
+  src/game/     规则引擎
+  src/ai/       离线规则 AI
+  src/render/   Three.js 场景
+  public/       PWA 与离线缓存</code></pre>
+          </div>
+          <div class="architecture-column">
+            <span class="architecture-tag">PARTY / APACHE-2.0</span>
+            <h3>手机与共享屏的实时房间</h3>
+            <pre><code>backend/
+  domain/       状态机与投影
+  application/  房间与恢复
+  interfaces/   HTTP / WebSocket
 frontend/
-  player/       seat view · actions · replay
-  host/         pairing · pause · recovery
-  stage/        public-only shared screen
-docs/
-  specs/        frozen contracts
-  DEPLOYMENT.md single-container delivery</code></pre>
-          <div class="principles">
-            <h3>不可让步的约束</h3>
-            <ul>
-              <li>所有状态变化都必须经过 <code>apply_command()</code>。</li>
-              <li>AI 不拥有状态，也不能绕过规则核心。</li>
-              <li>座位私密信息不进入公共屏或其他座位。</li>
-              <li>公开契约使用严格模型与确定性验证。</li>
-            </ul>
+  player/ host/ stage/</code></pre>
           </div>
         </div>
       </section>
 
-      <section class="section closing">
-        <p class="eyebrow">AI-assisted Werewolf Game Master</p>
-        <h2>让每个人都能回到牌桌上。</h2>
-        <p>项目采用 Apache License 2.0。源码、部署文档、规格与路线图均在 GitHub 仓库中。</p>
-        <div class="hero-actions">
-          <a class="button primary" href="https://github.com/Ma-Z-Y/ai-werewolf-dm">打开 GitHub</a>
-          <a class="button" href="https://github.com/Ma-Z-Y/ai-werewolf-dm/blob/main/docs/ROADMAP.md">查看路线图</a>
+      <section class="closing">
+        <div class="closing-inner reveal">
+          <p class="section-index">READY TO PLAY</p>
+          <h2>现在先打一局，<br />再决定要不要叫朋友。</h2>
+          <div class="hero-actions">
+            <a class="button primary" href="./solo/">
+              <span>单人试玩</span>
+              <span aria-hidden="true">→</span>
+            </a>
+            <a
+              class="button secondary"
+              href="https://github.com/Ma-Z-Y/ai-werewolf-dm"
+              target="_blank"
+              rel="noreferrer"
+            >
+              <span>打开 GitHub</span>
+              <span aria-hidden="true">↗</span>
+            </a>
+          </div>
         </div>
       </section>
     </main>
 
     <footer>
-      <span>AI 狼人杀 DM</span>
-      <span>Apache License 2.0</span>
-      <a href="https://github.com/Ma-Z-Y/ai-werewolf-dm">Ma-Z-Y/ai-werewolf-dm</a>
+      <div>
+        <a class="brand footer-brand" href="#top">
+          <span class="brand-mark" aria-hidden="true">DM</span>
+          <span>狼人杀 DM</span>
+        </a>
+        <p>AI 主持，真人推理。</p>
+      </div>
+      <div class="footer-links">
+        <a href="./solo/">单人试玩</a>
+        <a href="#six-player">六人朋友局</a>
+        <a href="https://github.com/Ma-Z-Y/ai-werewolf-dm">源码</a>
+        <a href="https://github.com/leoli-dev/ai-werewolf">单人版上游</a>
+      </div>
+      <p class="footer-license">
+        六人项目 Apache-2.0 · 单人衍生版 MIT
+      </p>
     </footer>
 
-    <script>
-      const copyButton = document.querySelector('[data-copy]');
-      copyButton?.addEventListener('click', async () => {
-        const text = copyButton.getAttribute('data-copy');
-        if (!text) return;
-        try {
-          await navigator.clipboard.writeText(text);
-          copyButton.textContent = '已复制';
-          window.setTimeout(() => (copyButton.textContent = '复制'), 1600);
-        } catch {
-          copyButton.textContent = '请手动复制';
-        }
-      });
-    </script>
+    <div class="copy-status" role="status" aria-live="polite"></div>
   </body>
 </html>
