@@ -14,6 +14,7 @@ import {
   HostRecoveryPanel,
   type HostRecoveryPayload,
 } from "./HostRecoveryPanel";
+import { RoomInvitePanel } from "./RoomInvitePanel";
 
 export interface HostControlScreenProps {
   roomCode: string;
@@ -71,6 +72,8 @@ export function HostControlScreen({
 
         <div className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_22rem]">
           <div className="grid content-start gap-8">
+            <RoomInvitePanel roomCode={roomCode} />
+
             <section aria-labelledby="host-round-control-title" className="grid gap-4">
               <div className="flex items-center justify-between gap-4">
                 <h2

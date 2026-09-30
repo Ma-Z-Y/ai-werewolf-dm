@@ -33,17 +33,22 @@
   指定的等价验收方式完成六座位真实协议、六人浏览器流程和重启恢复验收；
   该结论不替代真人主观体验判断。PR #33 已 squash merge 为 `614d737`，
   tag/Release `v0.4.0` 已发布。
+- [x] 在线即用网页交付：单容器同源托管、主持人邀请二维码/URL、无安装
+  首页、Docker Compose 持久卷、Cloudflare Tunnel/Caddy 部署文档和
+  CI Container 门禁已实现并通过本地交付门禁；尚未作为独立版本发布。
 
 ## 下一步
 
 - [ ] 安排合适的真人六人局域网体验复核，重点验证易用性、节奏和主持人
   主观负担；机制、协议、恢复与隐私已由代理等价验收覆盖。
+- [ ] 选择临时 Cloudflare Tunnel 或固定 VPS 域名，完成公网部署和真机
+  网络可达性验证。
 - [ ] 后续版本化设计 provider/LLM 重入。
 
 每项任务只有在实现、确定性测试、独立复核和用户验收都完成后才会标记为
 完成。正式版本只会在对应阶段的验收出口通过后发布。当前本地 P1 验证
-结果为 backend `773 passed, 10 skipped`、latency `8 passed, 2 skipped`、
-前端 Vitest `175 passed`、Playwright `15 passed`，ruff、format、
+当前结果为 backend `774 passed, 10 skipped`、latency `8 passed, 2 skipped`、
+前端 Vitest `179 passed`、Playwright `15 passed`，ruff、format、
 strict mypy、lint、typecheck 和 build 均通过。根 `verify-delivery.ps1`
 已在最终 handoff 更新前通过。PR #33 的 required checks、CodeQL 和隔离
 latency gate 通过；`main@614d737` 的主分支 CI 与 CodeQL 也成功。
